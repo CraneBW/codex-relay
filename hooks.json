@@ -1,0 +1,9 @@
+{
+  "codex-relay-context": {
+    "enabled": true,
+    "PreToolUse": [{
+      "matcher": "(^relay_|^mcp_.*codex[-_]relay.*_relay_)(dispatch|discuss|control|inspect)$",
+      "hooks": [{"type": "command", "command": "node ./scripts/context.mjs"}]
+    }]
+  }
+}

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex 任务</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: var(--color-background-primary, light-dark(#fafbf8, #191c1b));
+  --surface: var(--color-background-secondary, light-dark(#f0f2ee, #242826));
+  --text: var(--color-text-primary, light-dark(#19221e, #e1e9e3));
+  --muted: var(--color-text-secondary, light-dark(#526058, #acb9af));
+  --line: var(--color-border-primary, light-dark(#d8dfd8, #3d4740));
+  --green: var(--color-text-success, light-dark(#176947, #81d3a4));
+  --amber: var(--color-text-warning, light-dark(#854a04, #efb673));
+  --focus: var(--color-ring-primary, var(--green));
+  --success-bg: var(--color-background-success, light-dark(#e6f5eb, #26392e));
+  --warning-bg: var(--color-background-warning, light-dark(#fff4e4, #3d3022));
+  --mono: var(--font-mono, ui-monospace, monospace);
+  font: 14px/1.5 var(--font-sans, system-ui, sans-serif);
+  background: var(--bg);
+  color: var(--text);
+}
+* { box-sizing: border-box }
+body { margin: 0 }
+main { max-width: 1080px; margin: auto; padding: 18px }
+h1 { font-size: 20px; letter-spacing: -.04em; margin: 0 }
+h2 { font-size: 17px; line-height: 1.35; margin: 0; overflow-wrap: anywhere }
+h3, h4 { margin: 0 }
+h3 { font-size: 14px }
+h4 { font-size: 12px; color: var(--muted) }
+h4:not(:first-child) { margin-top: 10px }
+header, .pager, .titleline { display: flex; gap: 8px; align-items: center; justify-content: space-between }
+header { border-bottom: 1px solid var(--line); padding-bottom: 12px }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding-top: 10px }
+.count, small, time { color: var(--muted) }
+.count, time, .badge { font-variant-numeric: tabular-nums }
+button { font: inherit; color: inherit; cursor: pointer }
+:where(button, summary, pre):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px }
+.task {
+  display: block;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom-color: var(--line);
+  width: 100%;
+  padding: 8px;
+  border-radius: 5px;
+}
+.task:hover, .task[aria-pressed=true] { background: var(--surface) }
+.task[aria-pressed=true] { border-color: var(--green) }
+.task strong { font-weight: 620; line-height: 1.35; overflow-wrap: anywhere }
+.task small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px }
+.state, .badge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 5px;
+  border-radius: var(--border-radius-full, 999px);
+  padding: 2px 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor }
+.state.running, .state.review, .state.done, .badge.success { color: var(--green); background: var(--success-bg) }
+.state.blocked, .state.waiting_user, .state.host, .badge.warning { color: var(--amber); background: var(--warning-bg) }
+p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap }
+.pager { margin-top: 8px }
+.pager button { background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 2px 9px }
+.pager button:disabled { opacity: .4; cursor: default }
+#error { margin: 12px 0; color: var(--amber) }
+#empty { padding: 18px 0; color: var(--muted) }
+[hidden] { display: none !important }
+#detail { display: grid; align-content: start; gap: 9px; min-width: 0 }
+#detail:empty { display: none }
+.overview .titleline { flex-wrap: wrap; justify-content: flex-start }
+.metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--surface);
+  border-radius: var(--border-radius-md, 8px);
+  font-size: 12px;
+}
+.metadata > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; min-width: 0 }
+.metadata .meta-wide { grid-column: 1 / -1; flex-wrap: nowrap }
+.metadata dt { flex: none; color: var(--muted) }
+.metadata dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-weight: 600 }
+.metadata time { color: inherit }
+.metadata code { font: 12px/1.4 var(--mono) }
+.card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--border-radius-md, 8px);
+  padding: 9px 10px;
+  background: var(--bg);
+}
+.card h3 { margin-bottom: 5px }
+.card .titleline h3 { margin-bottom: 0 }
+.card h4 + p, .card h4 + .excerpt { margin-top: 2px }
+.card.warning { border-inline-start: 3px solid var(--amber) }
+.progress { background: var(--surface); border-inline-start: 3px solid var(--green) }
+.delivery { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 6px; font-size: 12px; color: var(--muted) }
+.delivery.warning { color: var(--amber) }
+.delivery p { color: var(--text) }
+summary {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 2px;
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+summary:hover { text-decoration: underline }
+details:not([open]) > summary .close-label, details[open] > summary .open-label,
+.excerpt:has(> details[open]) > .preview { display: none }
+details[open] > summary { margin-bottom: 3px }
+.preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.goal-text > * + * { margin-top: 6px }
+.goal-text ul, .goal-text ol { margin-bottom: 0; padding-inline-start: 1.5em }
+.goal-text li { overflow-wrap: anywhere; white-space: pre-wrap }
+pre {
+  max-height: 8em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.5 var(--mono);
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: var(--border-radius-sm, 5px);
+  background: var(--surface);
+}
+pre[aria-label="命令输出"] { max-height: min(28em, 50vh) }
+.timeline { list-style: none; margin: 0; padding: 0 }
+.timeline li { padding: 6px 0; min-width: 0; font-size: 12px }
+.timeline li + li { border-top: 1px solid var(--line) }
+.timeline li:last-child { padding-bottom: 0 }
+.event-meta { display: flex; align-items: center; gap: 7px; margin-bottom: 3px }
+.event-command, .badge { overflow-wrap: anywhere }
+.event-command { font-family: var(--mono) }
+@media (min-width: 660px) {
+  .layout { grid-template-columns: minmax(210px, .8fr) minmax(300px, 1.3fr); gap: 22px }
+  #detail { border-left: 1px solid var(--line); padding-left: 16px }
+}
+@media (max-width: 659px) {
+  #list { max-height: 24vh; overflow: auto }
+  main { padding: 10px }
+  .layout { gap: 10px }
+}
+</style>
+<main>
+<header><h1>Codex 任务</h1><span class="count" id="count"></span></header>
+<p id="error" role="status" hidden></p>
+<div class="layout"><section aria-label="任务列表"><nav id="list"></nav><p id="empty">正在连接任务进程…</p>
+<div class="pager" id="pager" hidden><button id="prev">上一页</button><small id="page"></small><button id="next">下一页</button></div></section>
+<article id="detail" aria-label="任务详情"></article></div></main>
+<!-- application -->
+</html>
