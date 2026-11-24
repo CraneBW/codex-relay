@@ -15,6 +15,12 @@ const context = {
   roots: z.array(z.string()).max(100).optional().describe('由反重力钩子写入挂载的目录。'),
   hostProof: z.string().optional().describe('由宿主钩子填写，调用方省略。'),
 };
+const graph = {
+  graphId: z.string().trim().min(1).max(140).optional().describe('同一反重力对话内的任务群标识。'),
+  graphTitle: z.string().trim().min(1).max(160).optional().describe('任务群在面板上的标题。'),
+  nodeLabel: z.string().trim().min(1).max(80).optional().describe('依赖图节点短名，默认使用任务标题。'),
+  dependsOn: z.array(z.string().trim().min(1).max(140)).max(24).optional().describe('同一对话内已有上游任务的 UUID 或 requestKey。全部验收后启动。'),
+};
 const taskId = z.string().uuid();
 const appOnly = { ui: { visibility: ['app'] } };
 const modelOnly = { ui: { visibility: ['model'] } };
@@ -54,18 +60,18 @@ register('relay_dispatch', '将实现、修复或测试交给 Codex。' + coding
   cwd: z.string().max(4096).optional(), mode: z.enum(['read','write']).default('write'),
   difficulty: z.enum(difficulties).optional().describe(codingRoutes),
   model: z.enum(codingModels).optional().describe('独立指定编码模型。省略时使用难度对应的默认模型。'),
-  effort: z.enum(efforts).optional().describe('独立指定思考等级。省略时使用难度对应的默认等级。' + effortLimit), ...context,
+  effort: z.enum(efforts).optional().describe('独立指定思考等级。省略时使用难度对应的默认等级。' + effortLimit), ...graph, ...context,
 }, 'dispatch');
 register('relay_discuss', '邀请 Astra Max 与反重力讨论实验、结果或方案。可由反重力主动邀请；Astra 在只读项目中核对材料，返回时唤醒原对话。', {
   requestKey:z.string().trim().min(1).max(140), title:z.string().trim().min(1).max(160),
   question:z.string().trim().min(1).max(6000), position:z.string().trim().min(1).max(7000).describe('反重力当前的判断、怀疑或候选解释。'),
   materials:z.string().max(10000).optional().describe('相关文件路径、已运行的结果或约束。'),
-  cwd:z.string().max(4096).optional(), ...context,
+  cwd:z.string().max(4096).optional(), ...graph, ...context,
 }, 'discuss');
 register('relay_inspect', '读取本对话所派任务。省略 id 可找回该对话的任务列表，指定 id 查看结果、证据与活动。按事件或用户请求查询。', {
   id:taskId.optional(), offset:z.number().int().nonnegative().optional(), ...context,
 }, 'inspect');
-register('relay_control', 'steer 追加指令，takeover 等 Codex 停止后交出工作区，resume 在原会话续跑，ask_user 标记等待用户，accept 验收并释放写入队列，cancel 取消。编码续跑可独立覆盖 model 和 effort。给出 difficulty 时，省略的参数按新难度取默认值，否则沿用上一轮对应值。讨论续跑固定 Astra/max。', {
+register('relay_control', 'steer 追加指令，takeover 等 Codex 停止后交出工作区，resume 在原会话续跑，ask_user 标记等待用户，accept 验收并释放写锁及满足条件的下游，cancel 取消。编码续跑可独立覆盖 model 和 effort。给出 difficulty 时，省略的参数按新难度取默认值，否则沿用上一轮对应值。讨论续跑固定 Astra/max。', {
   id: taskId, action: z.enum(['steer','takeover','resume','ask_user','accept','cancel']),
   note: z.string().max(10000).optional(), expectedNotice: z.string().uuid().optional().describe('从通知操作任务时填写通知事件 ID。'), ...context,
   difficulty: z.enum(difficulties).optional().describe('用于编码续跑。省略时保留上一轮难度。' + codingRoutes),

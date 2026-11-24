@@ -2,11 +2,16 @@ import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { inside } from './paths.mjs';
 
 export const terminal = new Set(['done', 'cancelled']);
 export const clip = (value, size = 2400) => String(value ?? '').slice(0, size);
 export const tail = (value, size = 2400) => String(value ?? '').slice(-size);
 export const now = () => new Date().toISOString();
+export const taskLabel = task => task.nodeLabel || task.title;
+const reference = task => ({ id: task.id, label: taskLabel(task), status: task.status });
+const holdsWriteLock = task => task.mode === 'write' && !!task.lease;
+const blocked = new Set(['blocked', 'waiting_user', 'host']);
 
 export class Store {
   constructor(dir) {
@@ -93,16 +98,66 @@ export class Store {
     });
   }
 
+  pendingUpstreams(task) {
+    return (task.dependsOn || []).flatMap(id => {
+      const upstream = this.tasks.get(id);
+      if (!upstream || upstream.origin !== task.origin) return [{ id, label: id, status: 'missing' }];
+      return upstream.status === 'done' ? [] : [reference(upstream)];
+    });
+  }
+
+  writeBlockers(task) {
+    if (task.mode !== 'write') return [];
+    return [...this.tasks.values()].filter(other => other.id !== task.id && holdsWriteLock(other) &&
+      (inside(task.cwd, other.cwd) || inside(other.cwd, task.cwd)));
+  }
+
+  waitInfo(task) {
+    if (task.status !== 'queued') return null;
+    const upstreams = this.pendingUpstreams(task);
+    if (upstreams.length) {
+      const kind = upstreams.some(t => t.status === 'cancelled') ? 'upstream_cancelled'
+        : upstreams.some(t => blocked.has(t.status) || t.status === 'missing') ? 'upstream_blocked' : 'upstream';
+      return { kind, blockers: upstreams };
+    }
+    const conflicts = this.writeBlockers(task);
+    return conflicts.length ? { kind: 'write_lock', blockers: conflicts.map(t => ({ ...reference(t), cwd: t.cwd })) } : null;
+  }
+
   view(task, detail = false) {
     const { id, title, cwd, mode, model, effort, status, current, updated, delivery, noticeId, created } = task;
     const summary = { id, title, cwd, mode, model, effort, difficulty:task.difficulty || null,
-      kind: task.kind || 'execution', status, current: clip(current, 400), updated, created, delivery };
-    const discussion = detail && task.kind === 'discussion' ? this.db.prepare(
+      kind: task.kind || 'execution', status, current: clip(current, 400), updated, created, delivery,
+      graphId: task.graphId ?? null, graphTitle: task.graphTitle ?? null, nodeLabel: task.nodeLabel ?? null,
+      dependsOn: task.dependsOn || [], waitInfo: this.waitInfo(task), holdsWriteLock: holdsWriteLock(task) };
+    if (!detail) return summary;
+    const discussion = task.kind === 'discussion' ? this.db.prepare(
       'SELECT speaker,body,at FROM discussion_messages WHERE task_id=? ORDER BY rowid DESC LIMIT 8'
     ).all(task.id).reverse() : [];
-    return detail ? { ...summary, goal: task.goal, threadId: task.threadId,
+    const upstreams = summary.dependsOn.map(id => this.tasks.get(id)).filter(t => t?.origin === task.origin).map(reference);
+    const downstreams = [...this.tasks.values()].filter(t => t.origin === task.origin && t.dependsOn?.includes(id)).map(reference);
+    return { ...summary, goal: task.goal, threadId: task.threadId, upstreams, downstreams,
       result: task.result, command: task.command, events: task.events, noticeId, discussion,
-      deliveryError: task.deliveryError || '', turnId: task.turnId } : summary;
+      deliveryError: task.deliveryError || '', turnId: task.turnId };
+  }
+
+  graphs() {
+    const graphs = new Map();
+    for (const t of this.tasks.values()) {
+      if (!t.graphId) continue;
+      const key = JSON.stringify([t.origin, t.graphId]);
+      if (!graphs.has(key)) graphs.set(key, { origin: t.origin, graphId: t.graphId, graphTitle: null, nodes: [] });
+      const graph = graphs.get(key);
+      graph.graphTitle ||= t.graphTitle || null;
+      graph.nodes.push(this.view(t));
+    }
+    for (const graph of graphs.values()) {
+      const members = new Set(graph.nodes.map(t => t.id));
+      const sources = new Set(graph.nodes.flatMap(t => t.dependsOn));
+      graph.externalNodes = [...sources].filter(id => !members.has(id)).map(id => this.tasks.get(id))
+        .filter(t => t?.origin === graph.origin).map(t => this.view(t));
+    }
+    return [...graphs.values()];
   }
 
   board({ selected, limit = 40, offset = 0 }) {
@@ -110,6 +165,7 @@ export class Store {
       Number(terminal.has(a.status)) - Number(terminal.has(b.status)) || b.updated.localeCompare(a.updated));
     return { revision: this.revision, total: all.length, offset,
       tasks: all.slice(offset, offset + limit).map(t => this.view(t)),
+      graphs: this.graphs(),
       selected: selected && this.tasks.has(selected) ? this.view(this.tasks.get(selected), true) : null };
   }
 }

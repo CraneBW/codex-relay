@@ -18,9 +18,11 @@ node scripts/install.mjs
 
 - 反重力按任务选择默认模型和思考等级。简单修改用 `simple`（`gpt-6-luna` / `low`），实际点击、填表或截图验收等浏览器操作用 `browser`（`gpt-6.1-terra` / `medium`），纯前端代码修改按开发难度选档。常规开发和调试用 `standard`（`gpt-6.2-sol` / `high`），也是省略 `difficulty` 时的默认值。困难任务用 `hard`（Sol / `xhigh`），极高难度或错误代价高用 `exceptional`（Sol / `max`）。
 - `relay_dispatch` 支持独立指定 `model` 和 `effort`，省略的参数按难度取默认值。例如只指定 `effort: low` 时，默认仍用 Sol。编码任务 `resume` 时也可以独立指定两项。给出 `difficulty` 时，省略的参数按新难度取默认值。省略 `difficulty` 时，省略的参数沿用上一轮。Luna 和 Sol 最高 `max`，Terra 可用 `ultra`。
-- 多个写任务落到同一目录或上下级目录时依次执行。当前任务验收或取消后释放写入资格。只读任务可以并行。
+- 同目录只读任务可以并发，包括 Astra Max 讨论。工作目录互不包含的写任务也可并发。同一目录或上下级目录的写任务排队，面板展示排队原因及占锁任务，当前任务验收或取消后释放写锁。任务使用当前项目目录。
+- `relay_dispatch` 和 `relay_discuss` 可以用同一对话内的 `graphId` 组成任务依赖图。`graphTitle` 设置任务群标题，`nodeLabel` 设置节点短名。先派独立节点，再以任务 UUID 或 `requestKey` 填写下游的 `dependsOn`。上游进入 `review` 后由反重力逐项验收，全部 `accept` 后下游自动参与调度。首次启动时会收到已验收上游的结论、证据与验收备注。
 - 反重力可以主动邀请 **Astra Max** 讨论实验、结果和方案。你也可以说“请和 Astra Max 讨论这个实验的两个解释”。讨论固定使用 `gpt-6.2-astra` 和 `max`，以只读方式核对项目材料。反重力可以带着反例在同一会话追问。双方的发言和最终结论保存在 SQLite，面板可展开最近的讨论记录。
 - 面板的任务列表与详情都显示当前实际配置的模型和思考等级，续跑调整后随状态刷新。`relay_board` 和 `relay_inspect` 也返回 `model` 和 `effort`。详情还可查看目标、目录、当前步骤、最近命令、输出片段和测试退出码。
+- 有任务群时，面板按依赖层级绘制节点和箭头，可切换任务群并点击任意节点查看详情。详情中的前置任务和后续任务可直接跳转。`relay_board` 和 `relay_board_changes` 提供完整的 `graphs`，任务列表分页时图仍保留全部节点。
 - 一次命令失败会记入进度。当 Codex 明确报告无法推进、请求宿主介入，或执行轮次异常结束时，插件唤醒反重力。它可以给 Codex 一条新线索，也可以先接手工作目录解决问题，再把结论交还原会话。
 - Codex 报告交付后，反重力收到事件并核对文件和验证结果。只有新线索耗尽、需要用户决策或需要用户提供信息时，反重力才在原对话里提问。
 - 完全退出应用时保存进度并停止执行。重开后沿用原 Codex 会话，核对退出前已完成的步骤，再安排余下工作。运行到一半的系统进程需要检查现场后续跑。
@@ -42,6 +44,6 @@ npm run build
 
 MCP 服务与面板在 `dist/`。后台组件和 Codex 协议处理在 `sidecars/events/` 与 `src/`。反重力处理阻塞、验收和向用户提问的规则在 `rules/AGENTS.md`。
 
-输入 `/codex-playbook` 查看随插件安装的中文提示词，涵盖编码派单、阻塞交接、实验设计、结果复核、方案比较和同一会话追问。[提示词全文](skills/codex-playbook/SKILL.md)
+输入 `/codex-playbook` 查看随插件安装的中文提示词，涵盖编码派单、并行拆解与依赖图、阻塞交接、实验设计、结果复核、方案比较和同一会话追问。[提示词全文](skills/codex-playbook/SKILL.md)
 
-运行 `npm test` 可复测派单和续跑的模型与思考等级、面板数据、队列、阻塞交接、通知重试、进程重启和已完成轮次的恢复。这组测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。
+运行 `npm test` 可复测派单和续跑的模型与思考等级、并发与写锁、依赖图与验收门控、阻塞交接、通知重试以及进程恢复。这组测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。

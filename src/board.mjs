@@ -3,7 +3,9 @@ import { App, applyDocumentTheme, applyHostStyleVariables } from '@modelcontextp
 const app = new App({ name: 'Codex 任务', version: '0.1.1' }, {});
 const $ = id => document.getElementById(id);
 const labels = { queued:'排队中',starting:'连接中',running:'执行中',stopping:'正在暂停',blocked:'等待反重力',
-  host:'反重力排障',waiting_user:'等待你回答',review:'等待验收',done:'已完成',cancelled:'已取消' };
+  host:'反重力排障',waiting_user:'等待你回答',review:'等待验收',done:'已完成',cancelled:'已取消',missing:'记录缺失' };
+const queueLabels = { upstream:'等待上游验收', upstream_blocked:'上游遇到阻塞',
+  upstream_cancelled:'上游已取消', write_lock:'等目录写锁' };
 const difficulties = { simple:'简单',browser:'浏览器操作',standard:'常规',complex:'常规',hard:'复杂',exceptional:'极高' };
 const eventKinds = { model:'模型',command:'命令',file:'文件',tool:'工具',host:'宿主',accepted:'验收',
   blocked:'阻塞',review:'待验收',retry:'重试',message:'消息',user:'用户' };
@@ -14,13 +16,183 @@ function time(value, text = stamp(value)) {
   const node = el('time', text); node.dateTime = value; return node;
 }
 function profile(t) { return t.model + ' · ' + t.effort; }
+const taskLabel = t => t.nodeLabel || t.title;
+const mode = t => t.mode === 'read' ? '只读' : '可写';
+const queueText = t => t.waitInfo && queueLabels[t.waitInfo.kind] + ' · ' + t.waitInfo.blockers.map(b => b.label).join('、');
 function status(t) {
   const discussion = {running:'Astra 讨论中',review:'待反重力回应',done:'讨论已结束'};
   return el('span', (t.kind === 'discussion' && discussion[t.status]) || labels[t.status] || t.status, 'state ' + t.status);
 }
 function error(text) { $('error').textContent = text || ''; $('error').hidden = !text; }
 let selected, revision, controller, generation = 0, offset = 0, connected = false;
+let boardData, activeGraph, renderedGraph, graphSnapshot, optionSnapshot, pendingDetail;
 const limit = 30;
+const graphScrolls = new Map();
+const graphKey = g => JSON.stringify([g.origin, g.graphId]);
+const graphName = g => g.graphTitle || g.graphId;
+const taskGraph = id => boardData?.graphs?.find(g => g.nodes.some(t => t.id === id));
+
+function syncSelection() {
+  for (const row of document.querySelectorAll('button[data-task-id]')) {
+    row.setAttribute('aria-pressed', String(row.dataset.taskId === selected));
+  }
+}
+
+function revealNode() {
+  const scroll = $('graph-scroll');
+  const node = scroll.querySelector('.graph-node[aria-pressed=true]');
+  if (!node) return;
+  const box = node.getBoundingClientRect(), frame = scroll.getBoundingClientRect();
+  scroll.scrollBy({ left: Math.min(0, box.left - frame.left) || Math.max(0, box.right - frame.right + 12),
+    top: Math.min(0, box.top - frame.top) || Math.max(0, box.bottom - frame.bottom + 12) });
+}
+
+function revealDetail() {
+  if (matchMedia('(max-width: 659px)').matches) $('detail').firstElementChild?.scrollIntoView({ block:'nearest' });
+}
+
+function selectTask(id) {
+  selected = id;
+  const graph = taskGraph(id);
+  if (graph) activeGraph = graphKey(graph);
+  renderGraph(); syncSelection(); revealNode();
+  pendingDetail = $('detail').dataset.taskId === id ? undefined : id;
+  if (!pendingDetail) revealDetail();
+  restart();
+}
+
+function taskLinks(refs, key) {
+  const links = el('span', null, 'task-links');
+  for (const ref of refs || []) {
+    const button = el('button', ref.label + ' · ' + (labels[ref.status] || ref.status), 'task-link');
+    button.type = 'button'; button.dataset.detailKey = key + '-' + ref.id;
+    if (ref.cwd) button.title = ref.cwd;
+    button.onclick = () => selectTask(ref.id);
+    links.append(button);
+  }
+  return links.childElementCount ? links : null;
+}
+
+function graphLayers(graph) {
+  const external = graph.externalNodes || [];
+  const nodes = [...external, ...graph.nodes];
+  const ids = new Set(nodes.map(t => t.id));
+  const parents = new Map(graph.nodes.map(t => [t.id, t.dependsOn.filter(id => ids.has(id))]));
+  const outgoing = new Map(nodes.map(t => [t.id, []]));
+  const incoming = new Map(nodes.map(t => [t.id, parents.get(t.id)?.length || 0]));
+  for (const t of graph.nodes) for (const id of parents.get(t.id)) outgoing.get(id).push(t);
+  const layers = [], placed = new Set();
+  let ready = nodes.filter(t => !incoming.get(t.id));
+  while (ready.length) {
+    layers.push(ready);
+    const next = [];
+    for (const t of ready) {
+      placed.add(t.id);
+      for (const child of outgoing.get(t.id)) {
+        const count = incoming.get(child.id) - 1;
+        incoming.set(child.id, count);
+        if (!count) next.push(child);
+      }
+    }
+    ready = next;
+  }
+  if (placed.size !== nodes.length) layers.push(nodes.filter(t => !placed.has(t.id)));
+  return { layers, parents, external: new Set(external.map(t => t.id)) };
+}
+
+function svg(tag, attrs) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  return node;
+}
+
+function graphNode(t, external) {
+  const button = el('button', null, 'graph-node' + (external ? ' external' : ''));
+  button.type = 'button'; button.dataset.taskId = t.id;
+  const heading = el('span', null, 'titleline'); heading.append(el('strong', taskLabel(t)));
+  if (external) heading.append(el('span', '图外上游', 'badge'));
+  const flags = el('span', null, 'graph-flags');
+  flags.append(el('span', mode(t), 'badge'), status(t));
+  if (t.holdsWriteLock) flags.append(el('span', '持有写锁', 'badge warning'));
+  const progress = queueText(t) || preview(t.current || '等待更新', 120);
+  button.title = taskLabel(t) + '\n' + progress;
+  button.append(heading, el('small', profile(t)), flags, el('small', progress, t.waitInfo ? 'queue-warning' : ''));
+  button.onclick = () => selectTask(t.id);
+  return button;
+}
+
+let visibleEdges;
+function drawEdges() {
+  if (!visibleEdges) return;
+  const { edges, nodes, parents } = visibleEdges;
+  const frame = $('graph-canvas').getBoundingClientRect();
+  const boxes = new Map([...nodes].map(([id, node]) => [id, node.getBoundingClientRect()]));
+  const defs = svg('defs', {});
+  const arrow = svg('marker', { id:'graph-arrow', viewBox:'0 0 8 8', refX:7, refY:4,
+    markerWidth:8, markerHeight:8, markerUnits:'userSpaceOnUse', orient:'auto' });
+  arrow.append(svg('path', { d:'M0 0 L8 4 L0 8 Z', fill:'currentColor' })); defs.append(arrow);
+  const lines = [defs];
+  for (const [id, upstreams] of parents) {
+    const to = boxes.get(id);
+    const endX = to.left - frame.left + to.width / 2, endY = to.top - frame.top - 2;
+    for (const parent of upstreams) {
+      const from = boxes.get(parent);
+      const x = from.left - frame.left + from.width / 2, y = from.bottom - frame.top + 1;
+      const mid = (y + endY) / 2;
+      lines.push(svg('path', { d:`M${x} ${y} C${x} ${mid} ${endX} ${mid} ${endX} ${endY}`,
+        fill:'none', stroke:'currentColor', 'stroke-width':1.4, 'marker-end':'url(#graph-arrow)' }));
+    }
+  }
+  edges.replaceChildren(...lines);
+}
+
+function renderGraph() {
+  const graphs = boardData?.graphs || [];
+  $('graphs').hidden = !graphs.length;
+  if (!graphs.length) return;
+  const graph = graphs.find(g => graphKey(g) === activeGraph) || taskGraph(selected) || graphs[0];
+  activeGraph = graphKey(graph);
+  const picker = $('graph-select');
+  const names = new Map();
+  for (const g of graphs) names.set(graphName(g), (names.get(graphName(g)) || 0) + 1);
+  const options = graphs.map(g => [graphKey(g), names.get(graphName(g)) === 1 ? graphName(g)
+    : `${graphName(g)} · ${g.graphId} · ${g.origin.slice(0, 8)}`]);
+  const snapshot = JSON.stringify(options);
+  if (snapshot !== optionSnapshot) {
+    optionSnapshot = snapshot;
+    picker.replaceChildren(...options.map(([key, name]) => {
+      const option = el('option', name); option.value = key; return option;
+    }));
+  }
+  picker.value = activeGraph;
+  const content = JSON.stringify([activeGraph, graph.nodes, graph.externalNodes]);
+  if (content === graphSnapshot) return;
+  graphSnapshot = content;
+  const scroll = $('graph-scroll'), canvas = $('graph-canvas');
+  if (renderedGraph) graphScrolls.set(renderedGraph, [scroll.scrollLeft, scroll.scrollTop]);
+  const focus = canvas.contains(document.activeElement) ? document.activeElement.dataset.taskId : null;
+  const { layers, parents, external } = graphLayers(graph);
+  const edges = svg('svg', { class:'graph-edges', 'aria-hidden':'true' });
+  const nodes = new Map();
+  const rows = layers.map(layer => {
+    const row = el('div', null, 'graph-layer');
+    for (const t of layer) {
+      const node = graphNode(t, external.has(t.id));
+      nodes.set(t.id, node); row.append(node);
+    }
+    return row;
+  });
+  canvas.replaceChildren(edges, ...rows);
+  visibleEdges = { edges, nodes, parents };
+  drawEdges();
+  scroll.scrollTo(...(graphScrolls.get(activeGraph) || [0, 0]));
+  if (focus) nodes.get(focus)?.focus({ preventScroll:true });
+  renderedGraph = activeGraph;
+}
+
+new ResizeObserver(drawEdges).observe($('graph-canvas'));
+$('graph-select').onchange = event => { activeGraph = event.target.value; renderGraph(); syncSelection(); };
+
 function card(parent, title, cls = '') {
   const section = el('section', null, ('card ' + cls).trim());
   if (title) section.append(el('h3', title));
@@ -52,7 +224,7 @@ function field(parent, title, value, key) {
   if (key && isLong(value, 260, 5)) previewContent(parent, key, preview(value, 150), el('p', value));
   else parent.append(el('p', value));
 }
-function overview(parent, t) {
+function overview(parent, t, group) {
   const section = el('div', null, 'overview');
   const head = el('div', null, 'titleline'); head.append(el('h2', t.title), status(t));
   const metadata = el('dl', null, 'metadata');
@@ -62,9 +234,13 @@ function overview(parent, t) {
   for (const [label, value, cls] of [
     ['模型', t.model], ['思考等级', t.effort],
     ['难度 / 类型', t.kind === 'discussion' ? '讨论' : difficulties[t.difficulty] || t.difficulty],
-    ['权限', t.mode === 'read' ? '只读' : '可写'], ['更新时间', updated, 'meta-wide'],
+    ['权限', mode(t) + (t.holdsWriteLock ? ' · 持有写锁' : '')], ['更新时间', updated, 'meta-wide'],
     ['工作目录', t.cwd && el('code', t.cwd), 'meta-wide'],
+    ['所属任务群', group, 'meta-wide'],
+    ['前置任务', taskLinks(t.upstreams, 'upstream'), 'meta-wide'],
+    ['后续任务', taskLinks(t.downstreams, 'downstream'), 'meta-wide'],
   ]) {
+    if (!value && ['所属任务群', '前置任务', '后续任务'].includes(label)) continue;
     const item = el('div', null, cls);
     const description = el('dd'); description.append(value || '—');
     item.append(el('dt', label), description); metadata.append(item);
@@ -89,11 +265,12 @@ function activityPreview(value, cwd, command) {
   return preview(text, 120);
 }
 function progress(parent, t) {
-  const section = card(parent, '当前步骤', t.result?.outcome === 'blocked' ? 'progress warning' : 'progress');
-  const current = t.current || '等待更新';
+  const section = card(parent, '当前步骤', t.waitInfo || t.result?.outcome === 'blocked' ? 'progress warning' : 'progress');
+  const current = t.waitInfo ? queueLabels[t.waitInfo.kind] : t.current || '等待更新';
   const short = t.result && !isLong(current, 260, 5) ? current : activityPreview(current, t.cwd, !t.result);
   if (short !== current) previewContent(section, 'current', short, el('p', current));
   else section.append(el('p', current));
+  if (t.waitInfo) section.append(taskLinks(t.waitInfo.blockers, 'blocker'));
 
   if (Object.hasOwn(deliveryStates, t.delivery)) {
     const retry = t.delivery === 'retry';
@@ -185,7 +362,9 @@ function timeline(parent, t) {
 }
 let detailSnapshot;
 function renderDetail(t) {
-  const snapshot = JSON.stringify(t);
+  const graph = t && taskGraph(t.id);
+  const group = graph ? graphName(graph) : t?.graphTitle || t?.graphId;
+  const snapshot = JSON.stringify([t, group]);
   if (snapshot === detailSnapshot) return;
   detailSnapshot = snapshot;
   const detail = $('detail');
@@ -199,7 +378,7 @@ function renderDetail(t) {
   detail.replaceChildren();
   detail.dataset.taskId = t?.id || '';
   if (!t) return;
-  overview(detail, t);
+  overview(detail, t, group);
   progress(detail, t);
   if (t.command) commandCard(detail, t);
   if (t.goal?.trim()) {
@@ -227,18 +406,30 @@ function renderDetail(t) {
 }
 function render(data) {
   if (data.offline) { error(data.offline); return; }
+  const x = window.scrollX, y = window.scrollY;
+  boardData = data;
+  renderGraph();
   error(''); $('count').textContent = data.total + ' 项'; $('empty').hidden = !!data.total;
   $('empty').textContent = '还没有反重力派给 Codex 的任务。';
-  const list = $('list'); const oldScroll = list.scrollTop; list.replaceChildren();
+  const list = $('list'); const oldScroll = list.scrollTop;
+  const focus = list.contains(document.activeElement) ? document.activeElement.dataset.taskId : null;
+  list.replaceChildren();
   for (const t of data.tasks) {
-    const row = el('button',null,'task'); row.type = 'button'; row.setAttribute('aria-pressed',String(t.id === selected));
+    const row = el('button',null,'task'); row.type = 'button'; row.dataset.taskId = t.id;
     const line = el('div',null,'titleline'); line.append(el('strong',t.title),status(t));
-    row.append(line,el('small',profile(t)),el('small',t.current)); row.onclick = () => { selected = t.id; restart(); }; list.append(row);
+    const progress = queueText(t) || t.current;
+    const executor = profile(t) + (t.holdsWriteLock ? ' · 持有写锁' : '');
+    row.append(line,el('small',executor,t.holdsWriteLock ? 'queue-warning' : ''),el('small',progress,t.waitInfo ? 'queue-warning' : ''));
+    row.onclick = () => selectTask(t.id); list.append(row);
+    if (focus === t.id) row.focus({ preventScroll:true });
   }
   list.scrollTop = oldScroll;
+  syncSelection();
   $('pager').hidden = data.total <= limit; $('prev').disabled = !offset; $('next').disabled = offset + limit >= data.total;
   $('page').textContent = Math.floor(offset / limit) + 1 + ' / ' + Math.max(1,Math.ceil(data.total / limit));
   renderDetail(data.selected);
+  window.scrollTo(x,y);
+  if (pendingDetail && pendingDetail === data.selected?.id) { pendingDetail = undefined; revealDetail(); }
 }
 function restart() {
   generation++; controller?.abort(); revision = undefined;

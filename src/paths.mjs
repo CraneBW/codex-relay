@@ -1,5 +1,10 @@
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
+
+export function inside(parent, child) {
+  const rel = relative(parent, child);
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep));
+}
 
 export const socketDir = process.env.CODEX_RELAY_SOCKET_DIR ||
   join(process.env.XDG_RUNTIME_DIR || tmpdir(), 'codex-relay-' + process.getuid());

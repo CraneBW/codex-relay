@@ -1,18 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, sep } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { Codex, discussionInstructions, discussionSchema, instructions, outcome, resultSchema } from './codex.mjs';
 import { astra, codingProfile, sol } from './models.mjs';
-import { clip, now, tail, terminal } from './store.mjs';
+import { clip, now, tail, taskLabel, terminal } from './store.mjs';
+import { inside } from './paths.mjs';
 import { checkContext } from './context.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const active = new Set(['starting', 'running', 'stopping']);
 const stoppedResult = (summary, evidence = '', next = '') => ({ outcome: 'blocked', summary: clip(summary), evidence: clip(evidence), next: clip(next) });
-function inside(parent, child) {
-  const rel = relative(parent, child);
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep));
-}
 function birth(pid) {
   try { return readFileSync('/proc/' + pid + '/stat', 'utf8').split(') ').at(-1).split(' ')[19]; }
   catch { return null; }
@@ -50,6 +47,29 @@ export class Supervisor {
     this.schedule();
   }
 
+  resolveDependencies(keys, ownTasks, origin, id, requestKey) {
+    const ids = new Set();
+    for (const key of keys) {
+      const upstream = this.store.tasks.get(key) || ownTasks.get(key);
+      if (upstream?.id === id || (!upstream && key === requestKey)) throw Error('前置依赖不能指向任务自身。');
+      if (upstream?.origin !== origin) throw Error('前置依赖必须是当前对话内已存在的任务：' + key);
+      ids.add(upstream.id);
+    }
+
+    const path = new Set([id]), visited = new Set();
+    const stack = [...ids].map(upstream => [upstream, false]);
+    while (stack.length) {
+      const [upstream, returning] = stack.pop();
+      if (returning) { path.delete(upstream); visited.add(upstream); continue; }
+      if (path.has(upstream)) throw Error('前置依赖不能成环。变更已派发任务需要新的 requestKey。');
+      if (visited.has(upstream)) continue;
+      path.add(upstream);
+      stack.push([upstream, true]);
+      for (const parent of this.store.tasks.get(upstream)?.dependsOn || []) stack.push([parent, false]);
+    }
+    return [...ids];
+  }
+
   dispatch(a, discussion = false) {
     const origin = owner(a), cwd = checkedCwd(a.cwd, a.roots);
     const { model, effort, difficulty } = discussion ? { model:astra, effort:'max', difficulty:null }
@@ -61,15 +81,21 @@ export class Supervisor {
     if (discussion && (!a.question?.trim() || !a.position?.trim())) throw Error('讨论需要明确的问题和反重力自己的判断或疑点。');
     if (!a.title?.trim() || !goal?.trim() || !a.requestKey?.trim())
       throw Error('派单需要标题、任务和唯一 requestKey。');
-    const known = [...this.store.tasks.values()].find(t => t.origin === origin && t.requestKey === a.requestKey);
     if (!['write', 'read'].includes(mode)) throw Error('无效的工作区模式。');
+    const ownTasks = new Map([...this.store.tasks.values()].filter(t => t.origin === origin).map(t => [t.requestKey, t]));
+    const known = ownTasks.get(a.requestKey), id = known?.id || randomUUID();
+    const graphId = a.graphId ?? null, graphTitle = a.graphTitle ?? null, nodeLabel = a.nodeLabel ?? null;
+    const dependsOn = this.resolveDependencies(a.dependsOn || [], ownTasks, origin, id, a.requestKey);
     if (known) {
+      const originalParents = known.dependsOn || [];
       if (known.cwd !== cwd || known.goal !== goal || known.mode !== mode || (known.initialModel ?? known.model) !== model ||
-          (known.initialEffort ?? known.effort) !== effort)
-        throw Error('这个 requestKey 已用于另一个任务。新任务需要独立的 requestKey。');
+          (known.initialEffort ?? known.effort) !== effort || (known.graphId ?? null) !== graphId ||
+          (known.graphTitle ?? null) !== graphTitle || (known.nodeLabel ?? null) !== nodeLabel ||
+          originalParents.length !== dependsOn.length || dependsOn.some(parent => !originalParents.includes(parent)))
+        throw Error('这个 requestKey 已用于另一个任务。变更任务参数需要新的 requestKey。');
       return this.store.view(known);
     }
-    const t = { id: randomUUID(), origin, cwd, title: clip(a.title, 160), goal, requestKey: a.requestKey,
+    const t = { id, origin, cwd, title: clip(a.title, 160), goal, requestKey: a.requestKey, graphId, graphTitle, nodeLabel, dependsOn,
       kind, mode, model, effort, difficulty, initialModel:model, initialEffort:effort,
       status: 'queued', current: '等待执行', created: now(), updated: now(),
       lease: false, threadId: null, turnId: null, runKey: randomUUID(), prompt: goal, events: [], command: null,
@@ -98,13 +124,22 @@ export class Supervisor {
     if (this.closing) return;
     for (const t of this.store.tasks.values()) {
       if (t.status !== 'queued' || this.runs.has(t.id)) continue;
-      if (t.mode === 'write' && [...this.store.tasks.values()].some(other => other.id !== t.id &&
-        other.mode === 'write' && other.lease && (inside(t.cwd, other.cwd) || inside(other.cwd, t.cwd)))) continue;
+      if (this.store.pendingUpstreams(t).length || this.store.writeBlockers(t).length) continue;
       t.lease = true;
       t.status = 'starting'; t.current = t.recovering ? '核对退出前的执行记录' : '正在连接 Codex';
       this.store.persist(t);
       void this.execute(t);
     }
+  }
+
+  dependencyContext(t) {
+    if (!t.dependsOn?.length) return '';
+    const sources = t.dependsOn.map(id => {
+      const upstream = this.store.tasks.get(id);
+      return { 节点: taskLabel(upstream), 结论: clip(upstream.result?.summary, 360),
+        证据: clip(upstream.result?.evidence, 480), 反重力验收备注: clip(upstream.current, 300) };
+    });
+    return '\n\n已验收的上游产出。以下内容供本任务引用。\n' + JSON.stringify(sources, null, 2);
   }
 
   async execute(t) {
@@ -126,6 +161,8 @@ export class Supervisor {
       const opts = { cwd: t.cwd, model, approvalPolicy: 'on-request', sandbox: t.mode === 'read' ? 'read-only' : 'workspace-write',
         config: { model_reasoning_effort: t.effort },
         developerInstructions: discussion ? discussionInstructions : instructions };
+      // A crash can persist the thread before the initial turn is sent.
+      const initialPrompt = !t.threadId || (t.recovering && t.prompt === t.goal);
       const method = t.threadId ? 'thread/resume' : 'thread/start';
       const data = await rpc.request(method, t.threadId ? { ...opts, threadId: t.threadId, excludeTurns: true } : { ...opts, ephemeral: false });
       if (t.threadId && t.threadId !== data.thread.id) throw Error('Codex 返回了不同的会话。原任务已保留。');
@@ -150,9 +187,10 @@ export class Supervisor {
       if (t.intent) return;
       if (!live) {
         const recovery = t.recovering ? '\n上次应用退出中断了执行。先核对已有改动、进程和测试结果，再继续未完成的步骤。' : '';
+        const context = initialPrompt ? this.dependencyContext(t) : '';
         this.store.log(t, 'model', model + ' · ' + t.effort);
         const start = await rpc.request('turn/start', { threadId: t.threadId, model, effort: t.effort,
-          input: [{ type: 'text', text: marker + '\n' + t.prompt + recovery }], outputSchema: discussion ? discussionSchema : resultSchema });
+          input: [{ type: 'text', text: marker + '\n' + t.prompt + context + recovery }], outputSchema: discussion ? discussionSchema : resultSchema });
         t.turnId = start.turn.id;
       }
       t.recovering = false;
