@@ -7,10 +7,14 @@ await mkdir('dist', { recursive: true });
 const server = await build({ entryPoints: ['src/server.mjs'], bundle: true, platform: 'node', format: 'cjs',
   target: 'node22', outfile: 'dist/server.cjs', minify: true, legalComments: 'eof', metafile: true });
 const ui = await build({ entryPoints: ['src/board.mjs'], bundle: true, platform: 'browser',
-  target: 'es2022', format: 'iife', write: false, minify: true, legalComments: 'eof', metafile: true });
+  target: 'es2022', format: 'iife', outdir: 'dist', write: false, minify: true, legalComments: 'eof', metafile: true,
+  loader: { '.woff2': 'dataurl' } });
 const html = await readFile('src/board.html', 'utf8');
-await writeFile('dist/board.html', html.replace('<!-- application -->', () =>
-  '<script>' + ui.outputFiles[0].text.replace(/<\/script/gi,'<\\/script') + '</script>'));
+const css = ui.outputFiles.find(file => file.path.endsWith('.css')).text;
+const js = ui.outputFiles.find(file => file.path.endsWith('.js')).text;
+await writeFile('dist/board.html', html
+  .replace('<!-- styles -->', () => '<style>' + css.replace(/<\/style/gi, '<\\/style') + '</style>')
+  .replace('<!-- application -->', () => '<script>' + js.replace(/<\/script/gi, '<\\/script') + '</script>'));
 
 const bundled = new Set();
 for (const { metafile } of [server, ui]) {
