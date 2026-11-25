@@ -1,33 +1,33 @@
-import { button, el, interrupted, patch, plainPreview, queueText, stateBadge, time, withKeys } from './ui.mjs';
+import { button, el, interrupted, patch, plainPreview, queueText, stateBadge, statusLabel, time, withKeys } from './ui.mjs';
 import { field, hasText, interruption, sameText, section } from './content.mjs';
 import { prose } from './markdown.mjs';
 
-const ag = '反重力';
-const astra = 'Astra Max';
-const speakerTone = speaker => speaker === ag ? 'antigravity' : speaker === astra ? 'astra' : 'sol';
-const speakerBadge = speaker => el('span', speaker, `model-badge model-${speakerTone(speaker)}`);
+const speakers = { main:'反重力 · 主对话', subagent:'反重力 · 子代理', astra:'Astra Max' };
+const actorOf = message => Object.hasOwn(speakers, message.actor) ? message.actor : message.speaker === 'Astra Max' ? 'astra' : 'main';
+const speakerBadge = actor => el('span', speakers[actor], `model-badge model-${actor}`);
 const letters = new Intl.NumberFormat('zh-CN');
 const characters = text => [...text.replace(/\s/g, '')].length;
 
 function getRounds(task) {
   const messages = task.discussion || [];
-  const final = task.status === 'done' && messages.at(-1)?.speaker === ag ? messages.at(-1) : null;
+  const last = messages.at(-1);
+  const final = task.status === 'done' && last && actorOf(last) === 'main' ? last : null;
   const replies = final ? messages.slice(0, -1) : messages;
   const rounds = [];
-  const keys = withKeys(replies, message => [message.at, message.speaker, message.body.slice(0, 80)]);
+  const keys = withKeys(replies, message => [message.at, actorOf(message), message.body.slice(0, 80)]);
   for (const [key, message] of keys) {
-    if (!rounds.length || message.speaker === ag) rounds.push({ key, messages:[] });
+    if (!rounds.length || actorOf(message) !== 'astra') rounds.push({ key, messages:[] });
     rounds.at(-1).messages.push([key, message]);
   }
   return { rounds, final, capped:messages.length >= 8, count:replies.length };
 }
 
 function messageBody(message, repeated = false) {
-  const tone = speakerTone(message.speaker);
-  const article = el('article', null, `message speaker-${tone}`);
+  const actor = actorOf(message);
+  const article = el('article', null, `message speaker-${actor}`);
   article.dataset.scrollAnchor = '';
   const head = el('header', null, 'message-head');
-  head.append(speakerBadge(message.speaker), time(message.at));
+  head.append(speakerBadge(actor), time(message.at));
   article.append(head);
   if (repeated) {
     const source = el('details', null, 'message-source');
@@ -43,7 +43,7 @@ function consensusEntry(task, final, showEmpty) {
     return showEmpty ? [['no-consensus', status, () => el('p', '本轮结论将在回复后显示。', 'empty-note')]] : [];
   }
   return [['consensus', [status, final, result], ([state, closing, outcome]) => {
-    const root = section(state === 'done' ? '最终共识' : '本轮结论', 'consensus');
+    const root = section(state === 'done' ? '主对话最终定论' : '本轮结论', 'consensus');
     if (closing) {
       root.append(messageBody(closing));
       if (!sameText(closing.body, outcome?.summary)) field(root, 'Astra Max 的结论', outcome?.summary);
@@ -59,15 +59,15 @@ function progressEntry(task, count, capped) {
   if (task.status === 'done' || task.status === 'cancelled') return [];
   if (interrupted.has(task.status)) return interruption(task);
   const focus = task.status === 'review' ? task.result?.next : queueText(task) || task.current;
-  return [['discussion-progress', [task.status, count, capped, focus], ([status, number, windowed, text]) => {
+  return [['discussion-progress', [task.status, statusLabel(task), count, capped, focus], () => {
     const root = section(null, 'discussion-progress');
     const heading = el('div', null, 'section-line');
-    const round = number ? `${windowed ? '本段' : ''}第 ${number} 轮` : '讨论进度';
-    heading.append(el('h3', round), stateBadge({ status, kind:'discussion' }));
+    const round = count ? `${capped ? '本段' : ''}第 ${count} 轮` : '讨论进度';
+    heading.append(el('h3', round), stateBadge(task));
     root.append(heading);
-    if (hasText(text)) {
-      const label = status === 'review' ? '待回应焦点' : '';
-      const snippet = plainPreview(text, 220);
+    if (hasText(focus)) {
+      const label = task.status === 'review' ? '待回应焦点' : '';
+      const snippet = plainPreview(focus, 220);
       root.append(el('p', label ? `${label} · ${snippet}` : snippet, 'step-text'));
     }
     return root;
@@ -77,17 +77,17 @@ function progressEntry(task, count, capped) {
 function roundEntry(round, preferences) {
   const update = (root, value) => {
     const { number, windowed, messages, repeated } = value;
-    const speakers = [...new Set(messages.map(([, message]) => message.speaker))];
+    const actors = [...new Set(messages.map(([, message]) => actorOf(message)))];
     const first = messages[0][1];
     const last = messages.at(-1)[1];
     const count = letters.format(messages.reduce((sum, [, message]) => sum + characters(message.body), 0));
     const heading = el('span', null, 'round-heading');
-    heading.append(el('strong', `${windowed ? '本段' : ''}第 ${number} 轮`), ...speakers.map(speakerBadge),
+    heading.append(el('strong', `${windowed ? '本段' : ''}第 ${number} 轮`), ...actors.map(speakerBadge),
       el('span', `${count} 字`, 'count'), time(last.at));
     const preview = el('span', plainPreview(first.body, 135), 'round-preview');
     root.querySelector('summary').replaceChildren(heading, preview);
     patch(root.querySelector('.round-messages'), messages.map(([key, message]) => {
-      const repeat = repeated && message.speaker === astra && message.body === repeated;
+      const repeat = repeated && actorOf(message) === 'astra' && message.body === repeated;
       return [key, [message, repeat], ([item, duplicate]) => messageBody(item, duplicate)];
     }));
   };
@@ -157,15 +157,21 @@ function historyEntry(data, preferences) {
 export function discussionEntries(task, tab, { state }) {
   const { rounds, final, capped, count } = getRounds(task);
   const consensus = consensusEntry(task, final, tab === 'consensus');
-  if (tab === 'consensus') return consensus;
+  const handoff = hasText(task.handoff?.note) ? [['handoff', task.handoff.note, note => {
+    const root = section('子代理交接纪要', 'discussion-handoff');
+    root.append(prose(note));
+    return root;
+  }]] : [];
+  if (tab === 'consensus') return [...consensus, ...handoff];
   const result = task.result;
   const last = rounds.at(-1)?.messages.at(-1)?.[1];
   const concatenated = [result?.summary, result?.evidence, result?.disagreement, result?.next].filter(Boolean).join('\n\n');
-  const repeated = task.status === 'done' && last?.speaker === astra && last.body === concatenated.slice(0, 16000)
+  const repeated = task.status === 'done' && last && actorOf(last) === 'astra' && last.body === concatenated.slice(0, 16000)
     ? last.body : '';
   return [
     ...progressEntry(task, rounds.length, capped),
     ...(task.status === 'done' ? consensus : []),
+    ...handoff,
     ...historyEntry({ rounds, capped, count, repeated }, state),
   ];
 }

@@ -31,9 +31,12 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS discussion_messages (
         task_id TEXT NOT NULL, message_key TEXT NOT NULL, speaker TEXT NOT NULL, body TEXT NOT NULL, at TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'main',
         PRIMARY KEY(task_id,message_key)
       );
     `);
+    if (!this.db.prepare('PRAGMA table_info(discussion_messages)').all().some(column => column.name === 'actor'))
+      this.db.exec("ALTER TABLE discussion_messages ADD COLUMN actor TEXT NOT NULL DEFAULT 'main'");
     this.tasks = new Map(this.db.prepare('SELECT body FROM tasks ORDER BY rowid').all()
       .map(row => { const task = JSON.parse(row.body); return [task.id, task]; }));
     this.changes = new EventEmitter();
@@ -57,8 +60,10 @@ export class Store {
         this.db.prepare('INSERT INTO notices(id, task_id, origin, status) VALUES(?,?,?,?)')
           .run(task.noticeId, task.id, task.origin, task.status);
       }
-      if (message) this.db.prepare('INSERT OR IGNORE INTO discussion_messages VALUES(?,?,?,?,?)')
-        .run(task.id, message.key, message.speaker, clip(message.text, 16000), task.updated);
+      if (message) this.db.prepare(`INSERT INTO discussion_messages(task_id,message_key,speaker,body,at,actor) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(task_id,message_key) DO UPDATE SET body=excluded.body WHERE ?`)
+        .run(task.id, message.key, message.speaker, clip(message.text, 16000), task.updated,
+          message.actor ?? (message.speaker === 'Astra Max' ? 'astra' : 'main'), Number(!!message.amend));
       this.db.prepare('INSERT INTO tasks VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body')
         .run(task.id, task.origin, task.requestKey, JSON.stringify(task));
       this.db.exec('COMMIT');
@@ -122,7 +127,8 @@ export class Store {
       return { kind, blockers: upstreams };
     }
     const conflicts = this.writeBlockers(task);
-    return conflicts.length ? { kind: 'write_lock', blockers: conflicts.map(t => ({ ...reference(t), cwd: t.cwd })) } : null;
+    if (conflicts.length) return { kind: 'write_lock', blockers: conflicts.map(t => ({ ...reference(t), cwd: t.cwd })) };
+    return task.awaitingDelegate ? { kind: 'awaiting_delegate', blockers: [] } : null;
   }
 
   view(task, detail = false) {
@@ -130,16 +136,18 @@ export class Store {
     const summary = { id, title, cwd, mode, model, effort, difficulty:task.difficulty || null,
       ...sessionPermission({ mode }, task),
       kind: task.kind || 'execution', status, current: clip(current, 400), updated, created, delivery,
+      delegateOrigin: task.delegateOrigin || null, awaitingDelegate: !!task.awaitingDelegate, hasHandoff: !!task.handoff?.note,
       graphId: task.graphId ?? null, graphTitle: task.graphTitle ?? null, nodeLabel: task.nodeLabel ?? null,
       dependsOn: task.dependsOn || [], waitInfo: this.waitInfo(task), holdsWriteLock: holdsWriteLock(task) };
     if (!detail) return summary;
     const discussion = task.kind === 'discussion' ? this.db.prepare(
-      'SELECT speaker,body,at FROM discussion_messages WHERE task_id=? ORDER BY rowid DESC LIMIT 8'
+      `SELECT speaker,body,at,CASE WHEN speaker='Astra Max' THEN 'astra' ELSE actor END AS actor
+       FROM discussion_messages WHERE task_id=? ORDER BY rowid DESC LIMIT 8`
     ).all(task.id).reverse() : [];
     const upstreams = summary.dependsOn.map(id => this.tasks.get(id)).filter(t => t?.origin === task.origin).map(reference);
     const downstreams = [...this.tasks.values()].filter(t => t.origin === task.origin && t.dependsOn?.includes(id)).map(reference);
     return { ...summary, goal: task.goal, threadId: task.threadId, upstreams, downstreams,
-      result: task.result, command: task.command, events: task.events, noticeId, discussion,
+      result: task.result, command: task.command, events: task.events, noticeId, discussion, handoff: task.handoff || null,
       deliveryError: task.deliveryError || '', turnId: task.turnId };
   }
 

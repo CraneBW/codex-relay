@@ -6,6 +6,7 @@ import { astra, codingProfile, sessionPermission, sol } from './models.mjs';
 import { clip, now, tail, taskLabel, terminal } from './store.mjs';
 import { inside } from './paths.mjs';
 import { checkContext } from './context.mjs';
+import { requireDirectChild } from './lineage.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const active = new Set(['starting', 'running', 'stopping']);
@@ -79,7 +80,7 @@ export class Supervisor {
     return [...ids];
   }
 
-  dispatch(a, discussion = false) {
+  async dispatch(a, discussion = false) {
     const origin = owner(a), cwd = checkedCwd(a.cwd, a.roots);
     const { model, effort, difficulty } = discussion ? { model:astra, effort:'max', difficulty:null }
       : codingProfile(a.difficulty, a.effort, undefined, a.model);
@@ -92,7 +93,16 @@ export class Supervisor {
       throw Error('派单需要标题、任务和唯一 requestKey。');
     if (!['write', 'read'].includes(mode)) throw Error('无效的工作区模式。');
     const access = taskPermission(a, mode, discussion);
-    const ownTasks = new Map([...this.store.tasks.values()].filter(t => t.origin === origin).map(t => [t.requestKey, t]));
+    const initialDelegate = discussion ? a.delegate ?? null : null;
+    const initialDelegateOrigin = discussion ? a.delegateOrigin ?? null : null;
+    if (initialDelegate && initialDelegateOrigin) throw Error('delegate 与 delegateOrigin 只能传一个。');
+    const ownByRequest = () => new Map([...this.store.tasks.values()].filter(t => t.origin === origin).map(t => [t.requestKey, t]));
+    let ownTasks = ownByRequest();
+    if (initialDelegateOrigin && !ownTasks.has(a.requestKey)) {
+      await requireDirectChild(origin, initialDelegateOrigin);
+      if (this.closing) throw Error('反重力正在关闭，进度已保存。');
+      ownTasks = ownByRequest();
+    }
     const known = ownTasks.get(a.requestKey), id = known?.id || randomUUID();
     const graphId = a.graphId ?? null, graphTitle = a.graphTitle ?? null, nodeLabel = a.nodeLabel ?? null;
     const dependsOn = this.resolveDependencies(a.dependsOn || [], ownTasks, origin, id, a.requestKey);
@@ -102,6 +112,8 @@ export class Supervisor {
       if (access.sandbox !== (known.initialSandbox ?? legacyAccess.sandbox) ||
           access.approvalPolicy !== (known.initialApprovalPolicy ?? legacyAccess.approvalPolicy))
         throw Error('这个 requestKey 的首次派单权限不同。变更派单权限需要新的 requestKey。');
+      if ((known.initialDelegate ?? null) !== initialDelegate || (known.initialDelegateOrigin ?? null) !== initialDelegateOrigin)
+        throw Error('这个 requestKey 的首次委托参数不同。变更委托需要新的 requestKey。');
       if (known.cwd !== cwd || known.goal !== goal || known.mode !== mode || (known.initialModel ?? known.model) !== model ||
           (known.initialEffort ?? known.effort) !== effort || (known.graphId ?? null) !== graphId ||
           (known.graphTitle ?? null) !== graphTitle || (known.nodeLabel ?? null) !== nodeLabel ||
@@ -115,21 +127,26 @@ export class Supervisor {
       status: 'queued', current: '等待执行', created: now(), updated: now(),
       lease: false, threadId: null, turnId: null, runKey: randomUUID(), prompt: goal, events: [], command: null,
       result: null, savedOutcome: null, intent: null, delivery: null, noticeId: null };
+    if (discussion) {
+      Object.assign(t, { initialDelegate, initialDelegateOrigin, delegateOrigin: initialDelegateOrigin,
+        awaitingDelegate: initialDelegate === 'subagent' });
+      if (t.awaitingDelegate) this.store.log(t, 'delegate', '等待子代理认领');
+      if (t.delegateOrigin) this.store.log(t, 'delegate', '已绑定直系子代理 ' + t.delegateOrigin);
+    }
     this.store.persist(t, false, discussion ? { key: t.runKey + '/question', speaker: '反重力', text: goal } : null);
     this.schedule();
     return this.store.view(t);
   }
 
-  owned(a) {
-    const t = this.store.tasks.get(a.id);
-    if (!t || t.origin !== owner(a)) throw Error('当前反重力对话没有这项派单。');
-    return t;
-  }
-
   inspect(a) {
-    if (a.id) return this.store.view(this.owned(a), true);
-    const origin = owner(a);
-    const all = [...this.store.tasks.values()].filter(t => t.origin === origin)
+    const caller = owner(a);
+    const visible = t => t && (t.origin === caller || t.delegateOrigin === caller);
+    if (a.id) {
+      const t = this.store.tasks.get(a.id);
+      if (!visible(t)) throw Error('当前反重力对话没有这项派单。');
+      return this.store.view(t, true);
+    }
+    const all = [...this.store.tasks.values()].filter(visible)
       .sort((a,b) => Number(terminal.has(a.status)) - Number(terminal.has(b.status)) || b.updated.localeCompare(a.updated));
     const offset = a.offset || 0;
     return { total:all.length, offset, tasks:all.slice(offset,offset+40).map(t => this.store.view(t)) };
@@ -138,7 +155,7 @@ export class Supervisor {
   schedule() {
     if (this.closing) return;
     for (const t of this.store.tasks.values()) {
-      if (t.status !== 'queued' || this.runs.has(t.id)) continue;
+      if (t.status !== 'queued' || t.awaitingDelegate || this.runs.has(t.id)) continue;
       if (this.store.pendingUpstreams(t).length || this.store.writeBlockers(t).length) continue;
       t.lease = true;
       t.status = 'starting'; t.current = t.recovering ? '核对退出前的执行记录' : '正在连接 Codex';
@@ -178,7 +195,7 @@ export class Supervisor {
         config: { model_reasoning_effort: t.effort },
         developerInstructions: discussion ? discussionInstructions : instructions };
       // A crash can persist the thread before the initial turn is sent.
-      const initialPrompt = !t.threadId || (t.recovering && t.prompt === t.goal);
+      const initialPrompt = !t.threadId || (t.recovering && (t.prompt === t.goal || t.runKey === t.initialRunKey));
       const method = t.threadId ? 'thread/resume' : 'thread/start';
       const data = await rpc.request(method, t.threadId ? { ...opts, threadId: t.threadId, excludeTurns: true } : { ...opts, ephemeral: false });
       if (t.threadId && t.threadId !== data.thread.id) throw Error('Codex 返回了不同的会话。原任务已保留。');
@@ -323,7 +340,7 @@ export class Supervisor {
       t.status = t.result.outcome === 'done' ? 'review' : 'blocked';
       t.current = t.result.summary; this.store.log(t, t.status, t.current); notify = true;
       if (t.kind === 'discussion' && t.savedOutcome && t.result.disagreement !== undefined) {
-        message = { key:t.runKey+'/reply', speaker:'Astra Max',
+        message = { key:t.runKey+'/reply', speaker:'Astra Max', actor:'astra',
           text:[t.result.summary,t.result.evidence,t.result.disagreement,t.result.next].filter(Boolean).join('\n\n') };
       }
     } else if (intent?.kind === 'shutdown' || afterCrash) {
@@ -336,11 +353,47 @@ export class Supervisor {
   }
 
   async control(a) {
-    const t = this.owned(a), run = this.runs.get(t.id);
-    if (a.expectedNotice && a.expectedNotice !== t.noticeId) throw Error('这条通知已过期，请检查任务的最新状态。');
+    const caller = owner(a), t = this.store.tasks.get(a.id);
+    if (!t) throw Error('当前反重力对话没有这项派单。');
+    const main = t.origin === caller;
+    const discussion = t.kind === 'discussion';
+    if (discussion && !main && ['accept', 'cancel'].includes(a.action))
+      throw Error('只有主对话可以验收或取消讨论。请先调用 handover 交还主对话。');
+    if (a.action !== 'claim' && !main && t.delegateOrigin !== caller) throw Error('当前反重力对话没有这项派单。');
+    if ((a.action === 'claim' || a.action === 'handover') && !discussion) throw Error('只有讨论任务支持认领和交接。');
+    if (!main && !['claim', 'handover', 'resume'].includes(a.action)) throw Error('此操作仅限主对话。');
     if (a.action !== 'resume' && (a.permission !== undefined || a.sandbox !== undefined || a.approvalPolicy !== undefined))
       throw Error('会话权限参数仅用于 resume。');
-    if (a.action === 'steer') {
+    if (a.action === 'claim' && t.delegateOrigin !== caller) {
+      await requireDirectChild(t.origin, caller);
+      if (this.closing) throw Error('反重力正在关闭，进度已保存。');
+    }
+    if (a.expectedNotice && a.expectedNotice !== t.noticeId) throw Error('这条通知已过期，请检查任务的最新状态。');
+    const run = this.runs.get(t.id);
+    if (a.action === 'claim') {
+      if (terminal.has(t.status)) throw Error('讨论已结束，无法认领。');
+      if (t.delegateOrigin === caller) return this.store.view(t, true);
+      if (t.delegateOrigin) throw Error('讨论已由另一位子代理认领。');
+      if (t.status !== 'queued' || !t.awaitingDelegate) throw Error('讨论当前未等待子代理认领。');
+      t.delegateOrigin = caller; t.awaitingDelegate = false;
+      const note = a.note?.trim();
+      if (note) {
+        t.initialRunKey = t.runKey;
+        t.prompt = t.goal + '\n\n反重力子代理认领时补充的材料\n' + note;
+      }
+      this.store.log(t, 'delegate', '直系子代理已认领讨论 ' + caller);
+      this.store.persist(t, false, note ? { key:t.runKey+'/question', speaker:'反重力', actor:'main', text:t.prompt, amend:true } : null);
+      this.schedule();
+    } else if (a.action === 'handover') {
+      if (terminal.has(t.status) || (!main && !['queued', 'review', 'blocked', 'waiting_user'].includes(t.status)))
+        throw Error('子代理须等待当前轮次结束后交接。主对话可收回未结束的讨论。');
+      t.delegateOrigin = null; t.awaitingDelegate = false;
+      const note = a.note?.trim();
+      if (note) t.handoff = { note, by: caller, at: now() };
+      this.store.log(t, 'handover', main ? '主对话已收回讨论控制权' : '子代理已交还讨论控制权');
+      this.store.persist(t);
+      if (t.status === 'queued') this.schedule();
+    } else if (a.action === 'steer') {
       if (t.status !== 'running' || !run || !a.note?.trim()) throw Error('补充指令需要运行中的 Codex 和指令内容。');
       await run.rpc.request('turn/steer', { threadId: t.threadId, expectedTurnId: t.turnId, input: [{ type: 'text', text: a.note }] });
       this.store.log(t, 'host', a.note); this.store.persist(t);
@@ -348,37 +401,41 @@ export class Supervisor {
       if (a.action === 'cancel' && terminal.has(t.status) || a.action === 'takeover' && t.status === 'host') return this.store.view(t);
       if (terminal.has(t.status) || (a.action === 'takeover' && !t.lease)) throw Error('任务尚未获得工作目录，或已结束。');
       if (t.status === 'stopping') throw Error('正在停止 Codex，请待此次接手调用完成。');
+      if (discussion) { t.delegateOrigin = null; t.awaitingDelegate = false; }
       this.markStop(t, a.action, a.note || '');
       if (run) { void this.interrupt(t, run); await run.closed; } else this.settle(t, false);
       this.schedule();
     } else if (a.action === 'resume') {
       if (!['host', 'blocked', 'waiting_user', 'review'].includes(t.status) || !a.note?.trim()) throw Error('交还任务需要待处理的任务和具体的新线索或用户答复。');
-      const access = taskPermission(a, t.mode, t.kind === 'discussion', t);
-      if (t.kind === 'discussion') {
+      const access = taskPermission(a, t.mode, discussion, t);
+      if (discussion) {
         if (a.difficulty !== undefined || (a.model !== undefined && a.model !== astra) ||
             (a.effort !== undefined && a.effort !== 'max')) throw Error('讨论固定使用 Astra/max，且不接受编码难度。');
+        if (main) { t.delegateOrigin = null; t.awaitingDelegate = false; }
       } else Object.assign(t, codingProfile(a.difficulty, a.effort, t, a.model));
       const legacyAccess = sessionPermission({ mode:t.mode });
       t.initialSandbox ??= legacyAccess.sandbox;
       t.initialApprovalPolicy ??= legacyAccess.approvalPolicy;
       Object.assign(t, access);
-      t.prompt = t.kind === 'discussion' ? '反重力对上一轮的追问或新证据：\n' + a.note
+      t.prompt = discussion ? `反重力${main ? '主对话' : '子代理'}对上一轮的追问或新证据：\n` + a.note
         : '反重力已处理上一阶段。原目标：' + t.goal + '\n继续指令：' + a.note;
       t.runKey = randomUUID(); t.turnId = null; t.intent = null; t.recovering = false; t.status = 'queued';
       t.result = null; t.noticeId = null; t.delivery = null; t.deliveryError = '';
       this.store.log(t, 'host', a.note);
-      this.store.persist(t, false, t.kind === 'discussion' ? { key:t.runKey+'/question',speaker:'反重力',text:a.note } : null);
+      this.store.persist(t, false, discussion ? { key:t.runKey+'/question', speaker:'反重力', actor:main ? 'main' : 'subagent', text:a.note } : null);
       this.schedule();
     } else if (a.action === 'ask_user') {
       if (!['blocked', 'host', 'review', 'waiting_user'].includes(t.status) || !a.note?.trim()) throw Error('请先接手阻塞，并提供需要用户回答的问题。');
+      if (discussion) { t.delegateOrigin = null; t.awaitingDelegate = false; }
       t.status = 'waiting_user'; t.current = clip(a.note); this.store.log(t, 'user', a.note); this.store.persist(t);
     } else if (a.action === 'accept') {
       if (t.status === 'done') return this.store.view(t);
       if (t.status !== 'review') throw Error('只有 Codex 已交付并待验收的任务可以标为完成。');
-      if (t.kind === 'discussion' && !a.note?.trim()) throw Error('结束讨论前，请写出反重力综合后的结论或仍存的分歧。');
+      if (discussion && !a.note?.trim()) throw Error('结束讨论前，请写出主对话独立综合后的结论或仍存的分歧。');
+      if (discussion) { t.delegateOrigin = null; t.awaitingDelegate = false; }
       t.status = 'done'; t.current = clip(a.note || '反重力已验收'); t.lease = false;
       this.store.log(t, 'accepted', t.current);
-      this.store.persist(t, false, t.kind === 'discussion' ? { key:t.runKey+'/conclusion',speaker:'反重力',text:a.note } : null);
+      this.store.persist(t, false, discussion ? { key:t.runKey+'/conclusion', speaker:'反重力', actor:'main', text:a.note } : null);
       this.schedule();
     } else throw Error('未知操作。');
     return this.store.view(t, true);

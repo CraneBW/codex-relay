@@ -1,5 +1,5 @@
 import {
-  $, button, copyButton, el, modelBadge, patch, permissionBadge, running, setText, stateBadge, time,
+  $, button, copyButton, delegateBadge, delegateLabel, el, modelBadge, patch, permissionBadge, running, setText, stateBadge, statusLabel, time,
 } from './ui.mjs';
 import { diagnosticEntries, goalEntry, overviewEntries, recordEntries } from './content.mjs';
 import { discussionEntries } from './discussion.mjs';
@@ -21,7 +21,9 @@ function showHeader(task, group, canOpenGraph, onOpenGraph) {
   if (!task) return;
   setText($('task-title'), task.title);
   $('task-title').title = task.title;
-  const badges = [['status', [task.status, task.kind], () => stateBadge(task)]];
+  const label = statusLabel(task), delegation = delegateLabel(task);
+  const badges = [['status', [task.status, label], () => stateBadge(task)]];
+  if (delegation && delegation !== label) badges.push(['delegate', delegation, () => delegateBadge(task)]);
   if (group) badges.push(['group', [group, task.id, canOpenGraph], ([label, id, clickable]) => {
     const badge = clickable ? button(label, 'group-badge') : el('span', label, 'group-badge');
     badge.title = clickable ? `查看依赖图 · ${label}` : label;

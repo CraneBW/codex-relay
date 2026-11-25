@@ -68,17 +68,19 @@ register('relay_dispatch', '将实现、修复或测试交给 Codex。' + coding
   model: z.enum(codingModels).optional().describe('独立指定编码模型。省略时使用难度对应的默认模型。'),
   effort: z.enum(efforts).optional().describe('独立指定思考等级。省略时使用难度对应的默认等级。' + effortLimit), ...sessionPermissions, ...graph, ...context,
 }, 'dispatch');
-register('relay_discuss', '邀请 Astra Max 与反重力讨论实验、结果或方案。可由反重力主动邀请；Astra 在只读项目中核对材料，返回时唤醒原对话。', {
+register('relay_discuss', '邀请 Astra Max 与反重力讨论实验、结果或方案。Astra 在只读项目中核对材料，返回时唤醒当前控制讨论的对话。', {
   requestKey:z.string().trim().min(1).max(140), title:z.string().trim().min(1).max(160),
   question:z.string().trim().min(1).max(6000), position:z.string().trim().min(1).max(7000).describe('反重力当前的判断、怀疑或候选解释。'),
   materials:z.string().max(10000).optional().describe('相关文件路径、已运行的结果或约束。'),
+  delegate:z.enum(['subagent']).optional().describe('先登记进依赖图，待主对话的直系子代理 claim 后启动首轮。与 delegateOrigin 互斥。'),
+  delegateOrigin:taskId.optional().describe('直接绑定已知的直系子代理对话 ID，通过谱系校验后启动。与 delegate 互斥。'),
   cwd:z.string().max(4096).optional(), ...graph, ...context,
 }, 'discuss');
-register('relay_inspect', '读取本对话所派任务。省略 id 可找回该对话的任务列表，指定 id 查看结果、证据与活动。按事件或用户请求查询。', {
+register('relay_inspect', '读取本对话派发或当前委托给本对话的任务。省略 id 查看列表，指定 id 查看结果、证据与活动。按事件或用户请求查询。', {
   id:taskId.optional(), offset:z.number().int().nonnegative().optional(), ...context,
 }, 'inspect');
-register('relay_control', 'steer 追加指令，takeover 等 Codex 停止后交出工作区，resume 在原会话续跑，ask_user 标记等待用户，accept 验收并释放写锁及满足条件的下游，cancel 取消。编码续跑可独立覆盖 model 和 effort。给出 difficulty 时，省略的参数按新难度取默认值，否则沿用上一轮对应值。权限参数仅用于 resume。给出 permission 时，省略的权限项按预设取值，否则逐项沿用上轮。' + permissionPresets + ' 讨论续跑固定 Astra/max、read-only、on-request。', {
-  id: taskId, action: z.enum(['steer','takeover','resume','ask_user','accept','cancel']),
+register('relay_control', 'steer 追加指令，takeover 等 Codex 停止后交出工作区，resume 在原会话续跑，ask_user 标记等待用户，accept 验收并放行符合条件的下游，cancel 取消。讨论任务的直系子代理可 claim、resume，结束代聊时用 handover 交还控制权。主对话可主动 handover 收回控制权，并负责 accept 或 cancel。编码续跑可独立覆盖 model 和 effort。给出 difficulty 时，省略的参数按新难度取默认值，否则沿用上一轮对应值。权限参数仅用于 resume。给出 permission 时，省略的权限项按预设取值，否则逐项沿用上轮。' + permissionPresets + ' 讨论续跑固定 Astra/max、read-only、on-request。', {
+  id: taskId, action: z.enum(['steer','takeover','resume','ask_user','accept','cancel','claim','handover']),
   note: z.string().max(10000).optional(), expectedNotice: z.string().uuid().optional().describe('从通知操作任务时填写通知事件 ID。'), ...context,
   difficulty: z.enum(difficulties).optional().describe('用于编码续跑。省略时保留上一轮难度。' + codingRoutes),
   model: z.enum([...codingModels, astra]).optional().describe('resume 独立指定下一轮模型。编码任务省略时按新难度取默认模型，未改难度时沿用上一轮。Astra 仅用于讨论任务。'),
@@ -91,7 +93,7 @@ server.registerResource('Codex 任务面板', uri, { mimeType: 'text/html;profil
 server.registerTool('relay_board', { title: 'Codex 任务', description: '打开反重力所派 Codex 任务的只读侧面板。', inputSchema: {},
   _meta: { ui: { resourceUri: uri }, 'com.google.antigravity/ui': { entrypoints: [{ type: 'aux_pane', title: 'Codex 任务' }] } },
 }, async (_, extra) => {
-  try { const data = await request('board', {}, extra.signal); return result(data, '任务面板，共 ' + data.total + ' 项。'); }
+  try { const { total } = await request('board', {}, extra.signal); return result({ total }, '任务面板，共 ' + total + ' 项。'); }
   catch (e) { return result({ offline: e.message }, e.message); }
 });
 server.registerTool('relay_board_changes', { description: '面板读取或等待任务状态变化。', _meta: appOnly,

@@ -22,10 +22,17 @@ node scripts/install.mjs
 - `relay_dispatch` 和 `relay_discuss` 可以用同一对话内的 `graphId` 组成任务依赖图。`graphTitle` 设置任务群标题，`nodeLabel` 设置节点短名。先派独立节点，再以任务 UUID 或 `requestKey` 填写下游的 `dependsOn`。上游进入 `review` 后由反重力逐项验收，全部 `accept` 后下游自动参与调度。首次启动时会收到已验收上游的结论、证据与验收备注。
 - 反重力可以主动邀请 **Astra Max** 讨论实验、结果和方案。你也可以说“请和 Astra Max 讨论这个实验的两个解释”。讨论固定使用 `gpt-6.2-astra` 和 `max`，以只读方式核对项目材料。反重力可以带着反例在同一会话追问。双方的发言和最终结论保存在 SQLite，面板可展开最近的讨论记录。
 - 面板的任务列表、依赖图和详情头部都显示当前模型、思考等级和会话权限，续跑调整后随状态刷新。完全开放、免审批和严格审批均有文字标识。详情还可查看目标、目录、当前步骤、最近命令、输出片段和测试退出码。
-- 有任务群时，面板按依赖层级绘制节点和箭头，可切换任务群并点击任意节点查看详情。详情中的前置任务和后续任务可直接跳转。`relay_board` 和 `relay_board_changes` 提供完整的 `graphs`，任务列表分页时图仍保留全部节点。
+- 有任务群时，面板按依赖层级绘制节点和箭头，可切换任务群并点击任意节点查看详情。详情中的前置任务和后续任务可直接跳转。`relay_board` 打开面板，面板专用的 `relay_board_changes` 提供完整的 `graphs`，任务列表分页时图仍保留全部节点。
 - 一次命令失败会记入进度。当 Codex 明确报告无法推进、请求宿主介入，或执行轮次异常结束时，插件唤醒反重力。它可以给 Codex 一条新线索，也可以先接手工作目录解决问题，再把结论交还原会话。
 - Codex 报告交付后，反重力收到事件并核对文件和验证结果。只有新线索耗尽、需要用户决策或需要用户提供信息时，反重力才在原对话里提问。
 - 完全退出应用时保存进度并停止执行。重开后沿用原 Codex 会话，核对退出前已完成的步骤，再安排余下工作。运行到一半的系统进程需要检查现场后续跑。
+
+## 委托子代理与 Astra Max 多轮讨论（方案 B）
+
+1. 主对话先用 `relay_discuss(delegate: 'subagent', ...)` 创建节点，填 `graphId` 和所需的 `dependsOn`，再把任务 ID 交给一个 `self` 子代理（`Model: 'inherit'`）。子代理严禁再派生子代理。任务登记后就出现在图中，首轮等待直系子代理 `claim`。若子代理已就绪且已知其对话 ID，可只传 `delegateOrigin` 直接绑定。重试沿用首次委托参数，变更委托参数需要新的 `requestKey`。
+2. 子代理认领后，在每次认领启动或 `resume` 后用 `schedule(..., TimerCondition: 'any')` 挂起等待通知。通知发给当前持有讨论控制权的对话。子代理只能读取当前绑定给自己的主对话任务，严禁 `accept` 或 `cancel`。
+3. 收敛后，子代理用 `handover` 保存交接纪要，结束本轮并向主对话汇报，此时省略 `schedule`。主对话可以随时收回未结束的讨论。子代理连续两次通知失败也会触发回退，通知切回原主对话。
+4. 主对话阅读讨论与交接纪要，独立核对证据和分歧，再直接用 `accept` 写最终定论并放行下游。面板分别显示主对话、子代理和 Astra Max 的发言，以及交接纪要和最终定论。
 
 ## 会话权限
 
@@ -41,13 +48,13 @@ node scripts/install.mjs
 
 续跑时传入 `permission`，省略的沙盒或审批项按新预设选择。省略 `permission` 时，逐项沿用上一轮。`requestKey` 重试按首次派单的权限组合核对，变更首次权限时需要新的 `requestKey`。发生 `requestApproval` 且操作超出现有授权时，反重力先用 `ask_user` 标记等待并在原对话征求确认，禁止静默切换到 `full`。
 
-面板「详细信息」显示完整的沙盒模式和审批策略。`relay_inspect`、`relay_board` 和 `relay_board_changes` 返回 `permission`、`sandbox` 和 `approvalPolicy`。`permission: custom` 表示实际组合不同于该任务模式的三个预设。
+面板「详细信息」显示完整的沙盒模式和审批策略。`relay_inspect` 和 `relay_board_changes` 返回 `permission`、`sandbox` 和 `approvalPolicy`。`permission: custom` 表示实际组合不同于该任务模式的三个预设。
 
 ## 本地数据与事件
 
 SQLite 的 `tasks.sqlite` 位于 Antigravity 分配给该后台组件的持久化数据目录，通常为 `~/.gemini/antigravity/sidecar_data/codex-relay/events/data/`。数据库存放任务、原对话 ID、Codex 会话 ID、队列、当前状态、近期活动和待投递事件。项目文件保存在派单工作目录。Codex 本身管理其会话历史。[Google 后台组件数据目录](https://antigravity.google/docs/sidecars) · [Codex App Server](https://developers.openai.com/codex/app-server)
 
-任务转入“等待反重力”或“等待验收”时，状态和通知一起提交到 SQLite。后台组件调用 `agentapi send-message` 投递到原对话，失败后退避重试。极端情况下，宿主已收件但插件尚未来得及记录回执，重开会重送同一个事件 ID。接收方按事件 ID 和任务当前状态核对。外部命令的副作用由续跑时的现场检查确认。
+任务转入“等待反重力”或“等待验收”时，状态和通知一起提交到 SQLite。后台组件调用 `agentapi send-message` 投递到当前控制任务的对话，失败后退避重试。极端情况下，宿主已收件但插件尚未来得及记录回执，重开会重送同一个事件 ID。接收方按事件 ID 和任务当前状态核对。外部命令的副作用由续跑时的现场检查确认。
 
 面板使用 Antigravity 的 MCP Apps 侧栏接口。工作区和原对话由宿主钩子注入，后台组件通过仅本机当前用户可访问的 Unix 套接字与 MCP 服务通信。[MCP Apps 面板](https://antigravity.google/docs/mcp-apps/) · [宿主钩子](https://antigravity.google/docs/hooks)
 
@@ -62,4 +69,4 @@ MCP 服务与面板在 `dist/`。后台组件和 Codex 协议处理在 `sidecars
 
 输入 `/codex-playbook` 查看随插件安装的中文提示词，涵盖编码派单、并行拆解与依赖图、阻塞交接、实验设计、结果复核、方案比较和同一会话追问。[提示词全文](skills/codex-playbook/SKILL.md)
 
-运行 `npm test` 可复测派单和续跑的模型、思考等级与会话权限，以及并发与写锁、依赖图与验收门控、阻塞交接、通知重试和进程恢复。这组测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。
+运行 `npm test` 可复测派单和续跑的模型、思考等级与会话权限，以及并发与写锁、依赖图与验收门控、子代理认领与交接、通知回退与重试、SQLite 迁移和进程恢复。这组测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。

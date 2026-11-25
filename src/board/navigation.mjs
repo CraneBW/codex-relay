@@ -1,5 +1,5 @@
 import {
-  $, attention, button, el, modelBadge, modelName, patch, permissionBadge, plainPreview, queueText, readSetting, running,
+  $, attention, button, delegateBadge, delegateLabel, el, modelBadge, modelName, patch, permissionBadge, plainPreview, queueText, readSetting, running,
   setText, stateBadge, statusLabel, taskLabel, writeSetting,
 } from './ui.mjs';
 
@@ -41,6 +41,7 @@ function updateTaskRow(row, task) {
   patch(row.querySelector('.task-model'), [
     ['model', [task.model, task.effort], () => modelBadge(task)],
     ['permission', [task.mode, task.sandbox, task.approvalPolicy], () => permissionBadge(task)],
+    ...(delegateLabel(task) ? [['delegate', delegateLabel(task), () => delegateBadge(task)]] : []),
   ]);
   const preview = row.querySelector('.task-preview');
   setText(preview, plainPreview(queueText(task) || task.current));
@@ -127,8 +128,9 @@ export function createNavigation({ onSelect, onCriteriaChange }) {
       group.node.hidden = !entries.length;
       group.setForced(!!filtered && !!entries.length);
       setText(group.count, `· ${entries.length}`);
-      patch(group.list, entries.map(({ id, title, nodeLabel, status, kind, model, effort, mode, sandbox, approvalPolicy, current, waitInfo }) => [
-        id, { id, title, nodeLabel, status, kind, model, effort, mode, sandbox, approvalPolicy, current, waitInfo },
+      patch(group.list, entries.map(({ id, title, nodeLabel, status, kind, model, effort, mode, sandbox, approvalPolicy, current,
+        waitInfo, delegateOrigin, awaitingDelegate }) => [
+        id, { id, title, nodeLabel, status, kind, model, effort, mode, sandbox, approvalPolicy, current, waitInfo, delegateOrigin, awaitingDelegate },
         value => taskRow(value, onSelect), updateTaskRow,
       ]));
     }

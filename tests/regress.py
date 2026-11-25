@@ -19,7 +19,7 @@ def assert_profile(view, model, effort, difficulty):
 def check_profile(m, task, model, effort, difficulty, thread_method):
     view = m.inspect(task)
     assert view["status"] == "review", view
-    board = m.call("relay_board", {})
+    board = m.call("relay_board_changes", {})
     selected = m.call("relay_board_changes", {"selected": task})["selected"]
     for display in (view, selected, next(t for t in board["tasks"] if t["id"] == task)):
         assert_profile(display, model, effort, difficulty)
@@ -44,7 +44,7 @@ def assert_access(view, expected):
 def check_access(m, task, expected, thread_method, status="review"):
     view = m.inspect(task)
     assert view["status"] == status, view
-    board = m.call("relay_board", {})
+    board = m.call("relay_board_changes", {})
     changes = m.call("relay_board_changes", {"selected": task})
     displays = [view, changes["selected"], next(t for t in board["tasks"] if t["id"] == task)]
     if view["graphId"]:
@@ -322,7 +322,7 @@ def check_dag(m):
     rejected(lambda: m.scoped('relay_discuss', {**b_args, 'requestKey': 'foreign-discuss', 'dependsOn': [a]}, foreign), '当前对话内已存在')
     m.scoped('relay_control', dict(id=foreign_task, action='cancel'), foreign)
 
-    board = m.call('relay_board', {})
+    board = m.call('relay_board_changes', {})
     first = m.call('relay_board_changes', {'offset': 0, 'limit': 1, 'selected': merge})
     second = m.call('relay_board_changes', {'offset': 1, 'limit': 1, 'selected': merge})
     assert first['total'] == second['total'] == board['total'] and first['tasks'] != second['tasks']
@@ -362,7 +362,7 @@ def check_unavailable_upstreams(m):
     for index in range(40):
         nodes.append(m.scoped('relay_dispatch', dict(requestKey=f'pagination-{index}', title=f'分页节点 {index}',
             goal='QUICK', graphId='blocked-graph', dependsOn=[a]))['id'])
-    board = m.call('relay_board', {})
+    board = m.call('relay_board_changes', {})
     group = next(g for g in board['graphs'] if g['graphId'] == 'blocked-graph')
     assert board['total'] > len(board['tasks']) == 40
     assert [task['id'] for task in group['nodes']] == nodes
@@ -370,6 +370,176 @@ def check_unavailable_upstreams(m):
     print('PASS blocked, waiting_user, host and cancelled upstream queue reasons')
     print('PASS complete 41-node graph across default and offset task pages')
     return b
+
+
+def check_delegation(m):
+    subagent_a, subagent_b, grandchild, wrong_depth, foreign = (str(uuid.uuid4()) for _ in range(5))
+    lineage = {child: dict(parentConversationId=parent, rootConversationId=root, nestingDepth=depth)
+        for child, parent, root, depth in (
+            (subagent_a, ORIGIN, ORIGIN, '1'), (subagent_b, ORIGIN, ORIGIN, 1),
+            (grandchild, subagent_a, ORIGIN, 2), (wrong_depth, ORIGIN, ORIGIN, 2),
+            (foreign, str(uuid.uuid4()), foreign, 1),
+        )}
+    (TEMP / 'metadata.json').write_text(json.dumps(lineage))
+    queries = TEMP / 'metadata-queries.jsonl'
+    assert not queries.exists(), '常规派单、查询和控制不应访问 agentapi 谱系'
+    graph = dict(graphId='delegated-research', graphTitle='委托复核')
+    args = dict(**graph, requestKey='delegated', title='复核反例', question='QUICK', position='主对话的初步判断')
+
+    def discuss(**changes):
+        return m.scoped('relay_discuss', {**args, **changes})
+
+    def inspect_as(task, caller):
+        return m.scoped('relay_inspect', {'id': task}, caller)
+
+    def control_as(task, action, caller=subagent_a, **fields):
+        return m.scoped('relay_control', dict(id=task, action=action, **fields), caller)
+
+    def response(task, target=ORIGIN, start=0):
+        packet = until(lambda: next((p for p in messages()[start:] if task in p[2]), None), timeout=12)
+        assert packet[:2] == ['send-message', target], packet
+        return packet[2]
+
+    begin = len(messages())
+    item = discuss(delegate='subagent')
+    task = item['id']
+    child = m.scoped('relay_dispatch', dict(**graph, requestKey='delegated-merge', title='综合结论', goal='QUICK',
+        mode='read', dependsOn=[task]))['id']
+    panel = m.call('relay_board_changes', {'selected': task})
+    nodes = next(g['nodes'] for g in panel['graphs'] if g['graphId'] == graph['graphId'])
+    assert [node['id'] for node in nodes] == [task, child] and nodes[1]['dependsOn'] == [task]
+    for view in (item, nodes[0], panel['selected'], m.inspect(task)):
+        assert view['status'] == 'queued' and view['awaitingDelegate'] and view['delegateOrigin'] is None
+        assert view['waitInfo'] == {'kind': 'awaiting_delegate', 'blockers': []}
+    assert m.call('relay_board', {}) == {'total': panel['total']}
+    assert panel['selected']['threadId'] is None and not panel['selected']['noticeId'] and len(messages()) == begin
+    assert discuss(delegate='subagent')['id'] == task and not queries.exists()
+    rejected(lambda: discuss(), '新的 requestKey')
+    rejected(lambda: discuss(delegateOrigin=subagent_a), '新的 requestKey')
+    rejected(lambda: discuss(delegate='subagent', delegateOrigin=subagent_a), '只能传一个')
+    for caller in (ORIGIN, grandchild, wrong_depth, foreign):
+        rejected(lambda: control_as(task, 'claim', caller), '直系子代理')
+    assert m.inspect(task)['threadId'] is None and len(messages()) == begin
+    for caller in (subagent_a, subagent_b, foreign):
+        rejected(lambda: inspect_as(task, caller), '没有这项派单')
+        assert m.scoped('relay_inspect', {}, caller)['total'] == 0
+
+    claim = control_as(task, 'claim', note='  补充原始结果  ')
+    assert claim['delegateOrigin'] == subagent_a and not claim['awaitingDelegate']
+    assert 'handover' in response(task, subagent_a, begin)
+    rejected(lambda: control_as(task, 'claim', subagent_b), '另一位子代理')
+    rejected(lambda: inspect_as(task, subagent_b), '没有这项派单')
+    rejected(lambda: control_as(task, 'resume', subagent_b, note='越权追问'), '没有这项派单')
+    assert m.scoped('relay_inspect', {}, subagent_b)['total'] == 0
+    assert [t['id'] for t in m.scoped('relay_inspect', {}, subagent_a)['tasks']] == [task]
+    first = inspect_as(task, subagent_a)
+    repeated = control_as(task, 'claim', note='忽略重复认领的材料')
+    history = TEMP / (first['threadId'] + '.history')
+    assert first['status'] == 'review' and first['noticeId'] == repeated['noticeId']
+    assert [msg['actor'] for msg in first['discussion']] == ['main', 'astra']
+    assert first['discussion'][0]['body'].endswith('补充原始结果') and len(json.loads(history.read_text())) == 1
+    assert '补充原始结果' in json.loads(history.read_text())[0]['items'][0]['content'][0]['text']
+    assert '补充原始结果' not in first['goal'] and discuss(delegate='subagent')['id'] == task
+    for action in ('accept', 'cancel'):
+        rejected(lambda: control_as(task, action, note='越权收口'), 'handover')
+    for action in ('ask_user', 'takeover', 'steer'):
+        rejected(lambda: control_as(task, action, note='越权介入'), '仅限主对话')
+
+    begin = len(messages())
+    control_as(task, 'resume', note='QUICK 子代理追问反例', expectedNotice=first['noticeId'])
+    response(task, subagent_a, begin)
+    second = inspect_as(task, subagent_a)
+    assert second['threadId'] == first['threadId'] and second['delegateOrigin'] == subagent_a
+    assert [msg['actor'] for msg in second['discussion']] == ['main', 'astra', 'subagent', 'astra']
+    handover = control_as(task, 'handover', note='  **仍有一处分歧**  ', expectedNotice=second['noticeId'])
+    assert handover['status'] == 'review' and handover['delegateOrigin'] is None and not handover['awaitingDelegate']
+    assert handover['discussion'] == second['discussion'] and handover['handoff']['at']
+    assert handover['hasHandoff'] and handover['handoff']['note'] == '**仍有一处分歧**' and handover['handoff']['by'] == subagent_a
+    assert handover['events'][-1]['kind'] == 'handover'
+    assert m.inspect(child)['waitInfo']['blockers'][0]['status'] == 'review' and m.inspect(child)['threadId'] is None
+    rejected(lambda: inspect_as(task, subagent_a), '没有这项派单')
+    rejected(lambda: control_as(task, 'claim'), '当前未等待')
+    rejected(lambda: control_as(task, 'cancel'), 'handover')
+    rejected(lambda: control_as(child, 'claim', ORIGIN), '只有讨论任务')
+    close = m.control(task, 'accept', '主对话重新核对原始证据后的定论', expectedNotice=second['noticeId'])
+    assert close['status'] == 'done' and close['handoff'] == handover['handoff']
+    assert close['discussion'][:-1] == second['discussion'] and close['discussion'][-1]['actor'] == 'main'
+    assert close['discussion'][-1]['body'] == close['current']
+    response(child)
+    downstream = m.inspect(child)
+    turns = json.loads((TEMP / (downstream['threadId'] + '.history')).read_text())
+    assert close['current'] in turns[0]['items'][0]['content'][0]['text']
+    m.control(child, 'accept')
+
+    for target in (ORIGIN, grandchild, foreign):
+        rejected(lambda: discuss(requestKey='invalid-direct', delegateOrigin=target), '直系子代理')
+    direct_args = dict(requestKey='direct', delegateOrigin=subagent_b)
+    begin = len(messages())
+    direct = discuss(**direct_args)['id']
+    assert m.inspect(direct)['delegateOrigin'] == subagent_b and discuss(**direct_args)['id'] == direct
+    response(direct, subagent_b, begin)
+    rejected(lambda: discuss(**{**direct_args, 'delegateOrigin': subagent_a}), '新的 requestKey')
+    begin = len(messages())
+    resumed = m.control(direct, 'resume', 'QUICK 主对话接管追问')
+    assert resumed['delegateOrigin'] is None and resumed['discussion'][-1]['actor'] == 'main'
+    response(direct, start=begin)
+    m.control(direct, 'accept', '核对完毕')
+
+    hold = discuss(requestKey='handover-running', delegateOrigin=subagent_b, question='HOLD')['id']
+    until(lambda: m.inspect(hold)['status'] == 'running')
+    rejected(lambda: control_as(hold, 'handover', subagent_b), '等待当前轮次结束')
+    forced = m.control(hold, 'handover')
+    assert forced['status'] == 'running' and forced['delegateOrigin'] is None
+    m.control(hold, 'steer', 'finish')
+    response(hold)
+    m.control(hold, 'accept', '核对完毕')
+
+    auto_clear = discuss(requestKey='accept-delegated', delegateOrigin=subagent_b)['id']
+    response(auto_clear, subagent_b)
+    accepted = m.control(auto_clear, 'accept', '主对话直接验收')
+    assert accepted['delegateOrigin'] is None and not accepted['awaitingDelegate']
+    assert accepted['discussion'][-1]['actor'] == 'main'
+
+    gate = discuss(requestKey='delegation-upstream', delegate='subagent')['id']
+    queued = discuss(requestKey='handover-queued', delegate='subagent', dependsOn=[gate])
+    assert queued['waitInfo']['kind'] == 'upstream' and queued['awaitingDelegate']
+    claimed = control_as(queued['id'], 'claim')
+    assert claimed['status'] == 'queued' and claimed['delegateOrigin'] == subagent_a
+    returned = control_as(queued['id'], 'handover')
+    assert returned['status'] == 'queued' and returned['waitInfo'] == queued['waitInfo'] and returned['threadId'] is None
+    assert returned['delegateOrigin'] is None and not returned['awaitingDelegate']
+    m.control(queued['id'], 'cancel')
+    m.control(gate, 'cancel')
+
+    dead = TEMP / f'dead-{subagent_a}'
+    offline = TEMP / 'offline'
+    dead.touch()
+    offline.touch()
+    try:
+        failed = discuss(requestKey='dead-delegate', delegateOrigin=subagent_a)['id']
+
+        def retried_main():
+            view = m.inspect(failed)
+            if view['delegateOrigin'] is not None or view['delivery'] != 'retry':
+                return None
+            attempts = [json.loads(line) for line in (TEMP / 'delivery-attempts.jsonl').read_text().splitlines()]
+            with sqlite3.connect(TEMP / 'state' / 'tasks.sqlite') as db:
+                retries = db.execute('SELECT attempts,retry_at FROM notices WHERE id=?', (view['noticeId'],)).fetchone()
+            targets = [p[1] for p in attempts if failed in p[2]]
+            return view if targets[:3] == [subagent_a, subagent_a, ORIGIN] and retries[0] > 0 and retries[1] > 0 else None
+
+        fallback = until(retried_main, timeout=12)
+        assert fallback['status'] == 'review' and not fallback['awaitingDelegate'] and fallback['handoff'] is None
+        assert sum(event['kind'] == 'handover' and '回退给主对话' in event['text'] for event in fallback['events']) == 1
+    finally:
+        offline.unlink()
+        dead.unlink()
+    assert fallback['noticeId'] in response(failed)
+    until(lambda: m.inspect(failed)['delivery'] == 'sent')
+    assert m.inspect(failed)['noticeId'] == fallback['noticeId']
+    m.control(failed, 'accept', '主对话接回并确认')
+    assert sorted(json.loads(line) for line in queries.read_text().splitlines()) == sorted(lineage)
+    print('PASS delegated DAG, scoped ownership, cached lineage, round actors, handover, main acceptance and dead-agent retry')
 
 
 def check():
@@ -471,6 +641,8 @@ def check():
             for field in ('graphId', 'graphTitle', 'nodeLabel', 'dependsOn'):
                 legacy.pop(field)
             db.execute('UPDATE tasks SET body=? WHERE id=?', (json.dumps(legacy), held))
+            db.execute('ALTER TABLE discussion_messages DROP COLUMN actor')
+            legacy_discussion = json.loads(db.execute('SELECT body FROM tasks WHERE request_key=?', ('discussion',)).fetchone()[0])['id']
         worker = start_worker()
         restored = m.call('relay_board_changes', {'limit': 1, 'selected': merge})
         assert len(restored['selected']['upstreams']) == 2 and restored['selected']['graphTitle'] == '科研结果复核'
@@ -478,7 +650,9 @@ def check():
         assert child['threadId'] is None and child['waitInfo']['kind'] == 'upstream_cancelled'
         original = m.dispatch('one','HOLD')
         assert original['id'] == held and original['graphId'] is None and original['dependsOn'] == []
-        print('PASS graph, blocked dependency and legacy task records survive sidecar restart')
+        assert [msg['actor'] for msg in m.inspect(legacy_discussion)['discussion']] == ['main', 'astra', 'main', 'astra', 'main']
+        print('PASS graph, blocked dependency, legacy task records and SQLite actor migration on restart')
+        check_delegation(m)
     finally:
         m.close();worker.terminate();worker.wait(timeout=12)
 

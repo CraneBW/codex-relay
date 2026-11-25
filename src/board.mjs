@@ -223,8 +223,10 @@ $('detail-content').addEventListener('click', event => {
 app.ontoolresult = response => {
   const data = response.structuredContent;
   if (!data || board) return;
-  if (!selected && data.tasks?.length) selected = orderTasks(data.tasks)[0].id;
-  receive(data.tasks ? { ...data, tasks:data.tasks.slice(0, limit) } : data);
+  if (data.offline) { showError(data.offline); return; }
+  if (!data.tasks) return;
+  if (!selected && data.tasks.length) selected = orderTasks(data.tasks)[0].id;
+  receive({ ...data, tasks:data.tasks.slice(0, limit) });
   if (connected) restart();
 };
 app.onhostcontextchanged = theme;

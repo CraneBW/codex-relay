@@ -8,16 +8,20 @@ export const labels = {
   queued: '排队中', starting: '连接中', running: '执行中', stopping: '正在暂停', blocked: '等待反重力',
   host: '反重力排障', waiting_user: '等待你回答', review: '等待验收', done: '已完成', cancelled: '已取消', missing: '记录缺失',
 };
-const discussionLabels = { running: '讨论中', review: '待反重力回应', done: '讨论已结束' };
+const discussionLabels = { running: '讨论中', done: '讨论已结束' };
 export const queueLabels = {
   upstream: '等待上游验收', upstream_blocked: '上游遇到阻塞', upstream_cancelled: '上游已取消', write_lock: '等待目录写锁',
+  awaiting_delegate: '等待子代理认领',
 };
 const models = new Map([
   [astra, ['Astra Max', 'astra']], [sol, ['Sol', 'sol']], [terra, ['Terra', 'terra']], [luna, ['Luna', 'luna']],
 ]);
 export const modelName = id => models.get(id)?.[0] || id;
 export const taskLabel = task => task.nodeLabel || task.title;
-export const statusLabel = task => (task.kind === 'discussion' && discussionLabels[task.status]) || labels[task.status] || task.status;
+export function statusLabel(task) {
+  if (task.kind === 'discussion' && task.status === 'review') return task.delegateOrigin ? '待子代理回应' : '待主对话定夺';
+  return (task.kind === 'discussion' && discussionLabels[task.status]) || labels[task.status] || task.status;
+}
 export const modeLabel = task => task.mode === 'read' ? '只读' : '可写';
 export const graphKey = graph => JSON.stringify([graph.origin, graph.graphId]);
 export const graphName = graph => graph.graphTitle || graph.graphId;
@@ -50,6 +54,17 @@ export function stateBadge(task, dotOnly = false) {
 export function modelBadge(task) {
   const name = modelName(task.model);
   return el('span', [name, task.effort].filter(Boolean).join(' · '), `model-badge model-${models.get(task.model)?.[1] || 'sol'}`);
+}
+
+export function delegateLabel(task) {
+  if (task.kind !== 'discussion') return '';
+  if (task.awaitingDelegate) return '等待子代理认领';
+  if (task.delegateOrigin) return '子代理讨论中';
+  return task.status === 'review' ? '待主对话定夺' : '';
+}
+
+export function delegateBadge(task) {
+  return el('span', delegateLabel(task), `delegate-badge${task.delegateOrigin ? ' delegate-active' : ''}`);
 }
 
 export function permissionBadge({ mode, sandbox = mode === 'read' ? 'read-only' : 'workspace-write', approvalPolicy = 'on-request' }) {

@@ -7,8 +7,9 @@ import { prose } from './markdown.mjs';
 const eventLabels = {
   model:'模型', permission:'会话权限', command:'命令', file:'文件', tool:'工具', host:'反重力', accepted:'验收',
   blocked:'阻塞', review:'交付', retry:'重试', message:'消息', user:'用户',
+  delegate:'讨论委托', handover:'控制权交接',
 };
-const deliveryLabels = { pending:'等待唤醒原对话', sent:'已投递唤醒通知', retry:'正在重试唤醒原对话' };
+const deliveryLabels = { pending:'等待投递唤醒通知', sent:'已投递唤醒通知', retry:'正在重试唤醒通知' };
 const failedCommand = new Set(['failed', 'declined', 'interrupted']);
 
 export const hasText = value => typeof value === 'string' && !!value.trim();
@@ -312,6 +313,8 @@ export function diagnosticEntries(task, { onSelect }) {
     ['任务模式', modeLabel(task)], ['沙盒模式', task.sandbox, 'raw'], ['审批策略', task.approvalPolicy, 'raw'],
     ['目录写锁', task.holdsWriteLock ? '持有' : '未持有'],
   ];
+  if (task.kind === 'discussion') values.push(['讨论控制权', task.awaitingDelegate ? '等待子代理认领'
+    : task.delegateOrigin ? '子代理代聊' : '主对话']);
   entries.push(['metadata', values, data => {
     const root = section('任务信息');
     const list = el('dl', null, 'diagnostic-list');

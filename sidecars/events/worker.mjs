@@ -39,8 +39,8 @@ const server = net.createServer(socket => {
       const { method, args = {} } = JSON.parse(input.trim());
       let result;
       if (supervisor.closing) throw Error('反重力正在关闭，进度已保存。');
-      if (method === 'dispatch') result = supervisor.dispatch(args);
-      else if (method === 'discuss') result = supervisor.dispatch(args, true);
+      if (method === 'dispatch') result = await supervisor.dispatch(args);
+      else if (method === 'discuss') result = await supervisor.dispatch(args, true);
       else if (method === 'control') result = await supervisor.control(args);
       else if (method === 'inspect') result = supervisor.inspect(args);
       else if (method === 'board') {
