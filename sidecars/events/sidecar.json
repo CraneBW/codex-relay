@@ -1,0 +1,7 @@
+{
+  "display_name": "Codex 任务与唤醒",
+  "description": "随反重力运行，接收 Codex 事件并唤醒派单的原对话。",
+  "command": "/bin/sh",
+  "args": ["../../scripts/run-node.sh", "worker.mjs"],
+  "restart_policy": "on-failure"
+}

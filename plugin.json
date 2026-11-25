@@ -1,0 +1,8 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "codex-relay",
+  "displayName": "Codex 调度台",
+  "version": "0.1.2",
+  "description": "按任务难度调度 Luna、Terra 和 Sol，邀请 Astra Max 讨论实验、结果和方案。完成或遇阻时唤醒派单对话，侧面板显示进度。",
+  "suggestedPrompts": ["修复当前项目的失败测试，按难度选择模型和思考程度，验收后告诉我。", "和 Astra Max 复核这份实验结果，写出双方判断、证据和最有区分力的对照。", "打开 Codex 任务面板。"]
+}

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "relay": {
+      "command": "/bin/sh",
+      "args": ["${PLUGIN_ROOT}/scripts/run-node.sh", "${PLUGIN_ROOT}/dist/server.cjs"],
+      "tools": {
+        "relay_dispatch": {"eager": true},
+        "relay_discuss": {"eager": true},
+        "relay_control": {"eager": true},
+        "relay_inspect": {"eager": true}
+      }
+    }
+  }
+}

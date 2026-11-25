@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex 调度台</title>
+  <!-- styles -->
+</head>
+<body>
+  <div id="app" class="app-shell" data-mobile="detail">
+    <header class="app-bar">
+      <div class="app-name">
+        <span class="app-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <h1>Codex 调度台</h1>
+      </div>
+      <div class="app-actions">
+        <button type="button" class="control" id="mobile-nav" aria-controls="task-nav" aria-expanded="false">任务列表</button>
+        <button type="button" class="control" id="graph-toggle" aria-controls="graphs" aria-expanded="false" hidden>依赖图</button>
+      </div>
+    </header>
+    <p id="error" class="connection-note" role="status" hidden></p>
+    <div id="workspace" class="workspace">
+      <aside id="task-nav" class="task-nav" aria-label="任务导航">
+        <div class="nav-head">
+          <div class="section-line"><h2>任务列表</h2><span class="count" id="count"></span></div>
+          <label class="search-field">
+            <span class="search-icon" aria-hidden="true"></span>
+            <input type="search" id="search" aria-label="按标题、节点、模型或目录筛选" placeholder="搜索任务、模型、目录" autocomplete="off">
+          </label>
+          <div id="filters" class="filters" role="group" aria-label="筛选状态">
+            <button type="button" data-filter="all" aria-pressed="true">全部</button>
+            <button type="button" data-filter="active" aria-pressed="false">进行中</button>
+            <button type="button" data-filter="attention" aria-pressed="false">待关注</button>
+            <button type="button" data-filter="done" aria-pressed="false">已完成</button>
+          </div>
+        </div>
+        <div id="list-scroll" tabindex="0" aria-label="任务列表">
+          <p id="list-empty" class="empty-note">正在连接任务进程…</p>
+          <section id="active-group" class="task-group" aria-labelledby="active-heading" hidden>
+            <h3 id="active-heading" class="group-heading">进行中与待关注 <span id="active-count" class="count"></span></h3>
+            <div id="active-list"></div>
+          </section>
+          <details id="done-group" class="task-group" hidden>
+            <summary class="group-heading">已完成 <span id="done-count" class="count"></span></summary>
+            <div id="done-list"></div>
+          </details>
+          <details id="cancelled-group" class="task-group" hidden>
+            <summary class="group-heading">已取消 <span id="cancelled-count" class="count"></span></summary>
+            <div id="cancelled-list"></div>
+          </details>
+        </div>
+        <nav class="pager" id="pager" aria-label="任务列表分页" hidden>
+          <button class="control" type="button" id="prev">上一页</button>
+          <span class="count" id="page"></span>
+          <button class="control" type="button" id="next">下一页</button>
+        </nav>
+      </aside>
+      <div id="splitter" class="splitter" role="separator" tabindex="0" aria-orientation="vertical"
+        aria-label="调整任务列表宽度" aria-controls="task-nav" title="拖动调整宽度，双击恢复默认"></div>
+      <main id="detail" class="detail">
+        <section id="graphs" class="graphs" aria-labelledby="graph-title" hidden>
+          <div class="graph-head">
+            <h2 id="graph-title">任务依赖图</h2>
+            <select id="graph-select" aria-label="选择任务群"></select>
+          </div>
+          <div id="graph-scroll" class="graph-scroll" tabindex="0" aria-label="任务依赖图画布">
+            <div id="graph-canvas" class="graph-canvas"></div>
+          </div>
+          <div id="graph-legend" class="graph-legend"><span>前置依赖</span><span class="lock-legend">写锁等待</span></div>
+        </section>
+        <header id="task-head" class="task-head" hidden>
+          <div class="heading-line">
+            <h2 id="task-title" tabindex="-1"></h2>
+            <div id="task-badges" class="task-badges"></div>
+          </div>
+          <div id="task-meta" class="task-meta" aria-label="任务概要"></div>
+        </header>
+        <div id="tabs" class="tabs" role="tablist" aria-label="任务详情视图" hidden></div>
+        <div class="detail-body">
+          <div id="detail-scroll" tabindex="0" aria-label="任务详情">
+            <div id="detail-content" class="detail-content"><p class="empty-note">等待任务数据…</p></div>
+          </div>
+          <button type="button" id="new-activity" class="new-activity" hidden>↓ 有新动态 · 回到底部</button>
+        </div>
+      </main>
+    </div>
+  </div>
+  <dialog id="reader" class="reader" aria-labelledby="reader-title">
+    <header class="reader-head">
+      <h2 id="reader-title">阅读原文</h2>
+      <div id="reader-actions" class="reader-actions">
+        <button type="button" id="reader-close" class="control" autofocus>关闭</button>
+      </div>
+    </header>
+    <div class="reader-scroll" tabindex="0"><pre id="reader-text"></pre></div>
+  </dialog>
+  <span id="feedback" class="sr-only" role="status"></span>
+  <!-- application -->
+</body>
+</html>
