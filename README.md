@@ -21,11 +21,27 @@ node scripts/install.mjs
 - 同目录只读任务可以并发，包括 Astra Max 讨论。工作目录互不包含的写任务也可并发。同一目录或上下级目录的写任务排队，面板展示排队原因及占锁任务，当前任务验收或取消后释放写锁。任务使用当前项目目录。
 - `relay_dispatch` 和 `relay_discuss` 可以用同一对话内的 `graphId` 组成任务依赖图。`graphTitle` 设置任务群标题，`nodeLabel` 设置节点短名。先派独立节点，再以任务 UUID 或 `requestKey` 填写下游的 `dependsOn`。上游进入 `review` 后由反重力逐项验收，全部 `accept` 后下游自动参与调度。首次启动时会收到已验收上游的结论、证据与验收备注。
 - 反重力可以主动邀请 **Astra Max** 讨论实验、结果和方案。你也可以说“请和 Astra Max 讨论这个实验的两个解释”。讨论固定使用 `gpt-6.2-astra` 和 `max`，以只读方式核对项目材料。反重力可以带着反例在同一会话追问。双方的发言和最终结论保存在 SQLite，面板可展开最近的讨论记录。
-- 面板的任务列表与详情都显示当前实际配置的模型和思考等级，续跑调整后随状态刷新。`relay_board` 和 `relay_inspect` 也返回 `model` 和 `effort`。详情还可查看目标、目录、当前步骤、最近命令、输出片段和测试退出码。
+- 面板的任务列表、依赖图和详情头部都显示当前模型、思考等级和会话权限，续跑调整后随状态刷新。完全开放、免审批和严格审批均有文字标识。详情还可查看目标、目录、当前步骤、最近命令、输出片段和测试退出码。
 - 有任务群时，面板按依赖层级绘制节点和箭头，可切换任务群并点击任意节点查看详情。详情中的前置任务和后续任务可直接跳转。`relay_board` 和 `relay_board_changes` 提供完整的 `graphs`，任务列表分页时图仍保留全部节点。
 - 一次命令失败会记入进度。当 Codex 明确报告无法推进、请求宿主介入，或执行轮次异常结束时，插件唤醒反重力。它可以给 Codex 一条新线索，也可以先接手工作目录解决问题，再把结论交还原会话。
 - Codex 报告交付后，反重力收到事件并核对文件和验证结果。只有新线索耗尽、需要用户决策或需要用户提供信息时，反重力才在原对话里提问。
 - 完全退出应用时保存进度并停止执行。重开后沿用原 Codex 会话，核对退出前已完成的步骤，再安排余下工作。运行到一半的系统进程需要检查现场后续跑。
+
+## 会话权限
+
+反重力可在 `relay_dispatch` 派发编码任务，或在 `relay_control` 的 `resume` 续跑时，显式选择 `permission`。
+
+| 预设 | 沙盒模式 | 审批策略 | 使用时机 |
+| --- | --- | --- | --- |
+| `default` | `read` 用 `read-only`，`write` 用 `workspace-write` | `on-request` 按需审批 | 日常任务，首次派单省略权限时使用 |
+| `auto` | 同 `default` | `never` 免审批 | 用户已授权免审批，且操作可在所选沙盒内完成 |
+| `full`（完全开放权限） | `danger-full-access` | `never` 免审批 | 用户明确要求完全开放，或任务确需跨工作区、联网等操作且用户已授权解除沙盒与免审批 |
+
+可独立覆盖 `sandbox` 或 `approvalPolicy`。`read-only` 只读，`workspace-write` 允许在工作区写入并沿用 Codex 的联网配置，`danger-full-access` 移除 Codex 沙盒限制。`on-request` 允许按需申请审批，`untrusted` 对非可信命令请求审批，`never` 禁止发起审批并遵循所选沙盒。`mode: read` 只允许 `read-only`，禁止 `full`。目录写锁按任务的 `mode` 和工作目录调度。Astra Max 讨论及追问固定为 `default`（`read-only` + `on-request`）。
+
+续跑时传入 `permission`，省略的沙盒或审批项按新预设选择。省略 `permission` 时，逐项沿用上一轮。`requestKey` 重试按首次派单的权限组合核对，变更首次权限时需要新的 `requestKey`。发生 `requestApproval` 且操作超出现有授权时，反重力先用 `ask_user` 标记等待并在原对话征求确认，禁止静默切换到 `full`。
+
+面板「详细信息」显示完整的沙盒模式和审批策略。`relay_inspect`、`relay_board` 和 `relay_board_changes` 返回 `permission`、`sandbox` 和 `approvalPolicy`。`permission: custom` 表示实际组合不同于该任务模式的三个预设。
 
 ## 本地数据与事件
 
@@ -46,4 +62,4 @@ MCP 服务与面板在 `dist/`。后台组件和 Codex 协议处理在 `sidecars
 
 输入 `/codex-playbook` 查看随插件安装的中文提示词，涵盖编码派单、并行拆解与依赖图、阻塞交接、实验设计、结果复核、方案比较和同一会话追问。[提示词全文](skills/codex-playbook/SKILL.md)
 
-运行 `npm test` 可复测派单和续跑的模型与思考等级、并发与写锁、依赖图与验收门控、阻塞交接、通知重试以及进程恢复。这组测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。
+运行 `npm test` 可复测派单和续跑的模型、思考等级与会话权限，以及并发与写锁、依赖图与验收门控、阻塞交接、通知重试和进程恢复。这组测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { Codex, discussionInstructions, discussionSchema, instructions, outcome, resultSchema } from './codex.mjs';
-import { astra, codingProfile, sol } from './models.mjs';
+import { astra, codingProfile, sessionPermission, sol } from './models.mjs';
 import { clip, now, tail, taskLabel, terminal } from './store.mjs';
 import { inside } from './paths.mjs';
 import { checkContext } from './context.mjs';
@@ -28,6 +28,15 @@ function owner(a) {
     throw Error('缺少反重力原对话 ID。请启用插件自带的 PreToolUse 钩子后重新派单。');
   if (!checkContext(a)) throw Error('派单上下文未通过宿主校验。请通过反重力直接调用本插件的工具。');
   return a.origin;
+}
+
+function taskPermission(a, mode, discussion, previous) {
+  if (!discussion) return sessionPermission({ ...a, mode }, previous);
+  if ((a.permission !== undefined && a.permission !== 'default') ||
+      (a.sandbox !== undefined && a.sandbox !== 'read-only') ||
+      (a.approvalPolicy !== undefined && a.approvalPolicy !== 'on-request'))
+    throw Error('讨论任务权限固定为 default（read-only + on-request）。');
+  return sessionPermission({ mode:'read' });
 }
 
 export class Supervisor {
@@ -82,12 +91,17 @@ export class Supervisor {
     if (!a.title?.trim() || !goal?.trim() || !a.requestKey?.trim())
       throw Error('派单需要标题、任务和唯一 requestKey。');
     if (!['write', 'read'].includes(mode)) throw Error('无效的工作区模式。');
+    const access = taskPermission(a, mode, discussion);
     const ownTasks = new Map([...this.store.tasks.values()].filter(t => t.origin === origin).map(t => [t.requestKey, t]));
     const known = ownTasks.get(a.requestKey), id = known?.id || randomUUID();
     const graphId = a.graphId ?? null, graphTitle = a.graphTitle ?? null, nodeLabel = a.nodeLabel ?? null;
     const dependsOn = this.resolveDependencies(a.dependsOn || [], ownTasks, origin, id, a.requestKey);
     if (known) {
       const originalParents = known.dependsOn || [];
+      const legacyAccess = sessionPermission({ mode:known.mode });
+      if (access.sandbox !== (known.initialSandbox ?? legacyAccess.sandbox) ||
+          access.approvalPolicy !== (known.initialApprovalPolicy ?? legacyAccess.approvalPolicy))
+        throw Error('这个 requestKey 的首次派单权限不同。变更派单权限需要新的 requestKey。');
       if (known.cwd !== cwd || known.goal !== goal || known.mode !== mode || (known.initialModel ?? known.model) !== model ||
           (known.initialEffort ?? known.effort) !== effort || (known.graphId ?? null) !== graphId ||
           (known.graphTitle ?? null) !== graphTitle || (known.nodeLabel ?? null) !== nodeLabel ||
@@ -97,6 +111,7 @@ export class Supervisor {
     }
     const t = { id, origin, cwd, title: clip(a.title, 160), goal, requestKey: a.requestKey, graphId, graphTitle, nodeLabel, dependsOn,
       kind, mode, model, effort, difficulty, initialModel:model, initialEffort:effort,
+      ...access, initialSandbox:access.sandbox, initialApprovalPolicy:access.approvalPolicy,
       status: 'queued', current: '等待执行', created: now(), updated: now(),
       lease: false, threadId: null, turnId: null, runKey: randomUUID(), prompt: goal, events: [], command: null,
       result: null, savedOutcome: null, intent: null, delivery: null, noticeId: null };
@@ -158,7 +173,8 @@ export class Supervisor {
       const discussion = t.kind === 'discussion';
       const model = t.model = discussion ? astra : t.model || sol;
       if (discussion || (model === sol && t.effort === 'ultra')) t.effort = 'max';
-      const opts = { cwd: t.cwd, model, approvalPolicy: 'on-request', sandbox: t.mode === 'read' ? 'read-only' : 'workspace-write',
+      const { permission, sandbox, approvalPolicy } = taskPermission({}, t.mode, discussion, t);
+      const opts = { cwd: t.cwd, model, approvalPolicy, sandbox,
         config: { model_reasoning_effort: t.effort },
         developerInstructions: discussion ? discussionInstructions : instructions };
       // A crash can persist the thread before the initial turn is sent.
@@ -167,6 +183,7 @@ export class Supervisor {
       const data = await rpc.request(method, t.threadId ? { ...opts, threadId: t.threadId, excludeTurns: true } : { ...opts, ephemeral: false });
       if (t.threadId && t.threadId !== data.thread.id) throw Error('Codex 返回了不同的会话。原任务已保留。');
       t.threadId = data.thread.id;
+      this.store.log(t, 'permission', `${permission} · ${sandbox} · ${approvalPolicy}`);
       this.store.persist(t);
       if (t.intent) return;
       const marker = '[codex-relay:' + t.runKey + ']';
@@ -189,7 +206,10 @@ export class Supervisor {
         const recovery = t.recovering ? '\n上次应用退出中断了执行。先核对已有改动、进程和测试结果，再继续未完成的步骤。' : '';
         const context = initialPrompt ? this.dependencyContext(t) : '';
         this.store.log(t, 'model', model + ' · ' + t.effort);
+        // Keep workspace-write's writable roots and network access from the thread configuration.
+        const sandboxOverride = sandbox === 'danger-full-access' ? { sandboxPolicy:{ type:'dangerFullAccess' } } : {};
         const start = await rpc.request('turn/start', { threadId: t.threadId, model, effort: t.effort,
+          approvalPolicy, ...sandboxOverride,
           input: [{ type: 'text', text: marker + '\n' + t.prompt + context + recovery }], outputSchema: discussion ? discussionSchema : resultSchema });
         t.turnId = start.turn.id;
       }
@@ -318,6 +338,8 @@ export class Supervisor {
   async control(a) {
     const t = this.owned(a), run = this.runs.get(t.id);
     if (a.expectedNotice && a.expectedNotice !== t.noticeId) throw Error('这条通知已过期，请检查任务的最新状态。');
+    if (a.action !== 'resume' && (a.permission !== undefined || a.sandbox !== undefined || a.approvalPolicy !== undefined))
+      throw Error('会话权限参数仅用于 resume。');
     if (a.action === 'steer') {
       if (t.status !== 'running' || !run || !a.note?.trim()) throw Error('补充指令需要运行中的 Codex 和指令内容。');
       await run.rpc.request('turn/steer', { threadId: t.threadId, expectedTurnId: t.turnId, input: [{ type: 'text', text: a.note }] });
@@ -331,10 +353,15 @@ export class Supervisor {
       this.schedule();
     } else if (a.action === 'resume') {
       if (!['host', 'blocked', 'waiting_user', 'review'].includes(t.status) || !a.note?.trim()) throw Error('交还任务需要待处理的任务和具体的新线索或用户答复。');
+      const access = taskPermission(a, t.mode, t.kind === 'discussion', t);
       if (t.kind === 'discussion') {
         if (a.difficulty !== undefined || (a.model !== undefined && a.model !== astra) ||
             (a.effort !== undefined && a.effort !== 'max')) throw Error('讨论固定使用 Astra/max，且不接受编码难度。');
       } else Object.assign(t, codingProfile(a.difficulty, a.effort, t, a.model));
+      const legacyAccess = sessionPermission({ mode:t.mode });
+      t.initialSandbox ??= legacyAccess.sandbox;
+      t.initialApprovalPolicy ??= legacyAccess.approvalPolicy;
+      Object.assign(t, access);
       t.prompt = t.kind === 'discussion' ? '反重力对上一轮的追问或新证据：\n' + a.note
         : '反重力已处理上一阶段。原目标：' + t.goal + '\n继续指令：' + a.note;
       t.runKey = randomUUID(); t.turnId = null; t.intent = null; t.recovering = false; t.status = 'queued';

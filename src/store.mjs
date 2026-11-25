@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { sessionPermission } from './models.mjs';
 import { inside } from './paths.mjs';
 
 export const terminal = new Set(['done', 'cancelled']);
@@ -127,6 +128,7 @@ export class Store {
   view(task, detail = false) {
     const { id, title, cwd, mode, model, effort, status, current, updated, delivery, noticeId, created } = task;
     const summary = { id, title, cwd, mode, model, effort, difficulty:task.difficulty || null,
+      ...sessionPermission({ mode }, task),
       kind: task.kind || 'execution', status, current: clip(current, 400), updated, created, delivery,
       graphId: task.graphId ?? null, graphTitle: task.graphTitle ?? null, nodeLabel: task.nodeLabel ?? null,
       dependsOn: task.dependsOn || [], waitInfo: this.waitInfo(task), holdsWriteLock: holdsWriteLock(task) };

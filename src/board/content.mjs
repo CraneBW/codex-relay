@@ -5,7 +5,7 @@ import {
 import { prose } from './markdown.mjs';
 
 const eventLabels = {
-  model:'模型', command:'命令', file:'文件', tool:'工具', host:'反重力', accepted:'验收',
+  model:'模型', permission:'会话权限', command:'命令', file:'文件', tool:'工具', host:'反重力', accepted:'验收',
   blocked:'阻塞', review:'交付', retry:'重试', message:'消息', user:'用户',
 };
 const deliveryLabels = { pending:'等待唤醒原对话', sent:'已投递唤醒通知', retry:'正在重试唤醒原对话' };
@@ -309,7 +309,8 @@ export function diagnosticEntries(task, { onSelect }) {
     ['任务 ID', task.id, 'raw'], ['线程 ID', task.threadId, 'raw'], ['轮次 ID', task.turnId, 'raw'],
     ['完整模型 ID', task.model, 'raw'], ['工作目录', task.cwd, 'raw'],
     ['创建时间', task.created, 'time'], ['更新时间', task.updated, 'time'], ['完成时间', completed || '', 'time'],
-    ['权限', modeLabel(task)], ['目录写锁', task.holdsWriteLock ? '持有' : '未持有'],
+    ['任务模式', modeLabel(task)], ['沙盒模式', task.sandbox, 'raw'], ['审批策略', task.approvalPolicy, 'raw'],
+    ['目录写锁', task.holdsWriteLock ? '持有' : '未持有'],
   ];
   entries.push(['metadata', values, data => {
     const root = section('任务信息');

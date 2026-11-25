@@ -1,5 +1,5 @@
 import {
-  $, attention, button, el, modelBadge, modelName, patch, plainPreview, queueText, readSetting, running,
+  $, attention, button, el, modelBadge, modelName, patch, permissionBadge, plainPreview, queueText, readSetting, running,
   setText, stateBadge, statusLabel, taskLabel, writeSetting,
 } from './ui.mjs';
 
@@ -38,9 +38,10 @@ function updateTaskRow(row, task) {
   row.title = title;
   const light = row.querySelector('.task-light');
   if (light.firstElementChild?.title !== statusLabel(task)) light.replaceChildren(stateBadge(task, true));
-  const model = row.querySelector('.task-model');
-  const badge = modelBadge(task);
-  if (model.firstElementChild?.textContent !== badge.textContent) model.replaceChildren(badge);
+  patch(row.querySelector('.task-model'), [
+    ['model', [task.model, task.effort], () => modelBadge(task)],
+    ['permission', [task.mode, task.sandbox, task.approvalPolicy], () => permissionBadge(task)],
+  ]);
   const preview = row.querySelector('.task-preview');
   setText(preview, plainPreview(queueText(task) || task.current));
   preview.classList.toggle('queue-note', !!task.waitInfo);
@@ -126,8 +127,9 @@ export function createNavigation({ onSelect, onCriteriaChange }) {
       group.node.hidden = !entries.length;
       group.setForced(!!filtered && !!entries.length);
       setText(group.count, `· ${entries.length}`);
-      patch(group.list, entries.map(({ id, title, nodeLabel, status, kind, model, effort, current, waitInfo }) => [
-        id, { id, title, nodeLabel, status, kind, model, effort, current, waitInfo }, value => taskRow(value, onSelect), updateTaskRow,
+      patch(group.list, entries.map(({ id, title, nodeLabel, status, kind, model, effort, mode, sandbox, approvalPolicy, current, waitInfo }) => [
+        id, { id, title, nodeLabel, status, kind, model, effort, mode, sandbox, approvalPolicy, current, waitInfo },
+        value => taskRow(value, onSelect), updateTaskRow,
       ]));
     }
     if (oldTop) scroll.scrollTop = oldTop;

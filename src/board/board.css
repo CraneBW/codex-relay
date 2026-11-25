@@ -156,7 +156,14 @@ details[open] > .group-heading::before, .round[open] > summary::before { transfo
   display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 .task-light { display: flex; flex: none; padding-inline-end: 1px }
-.task-model { display: flex; min-width: 0 }
+.task-model { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.permission-badge { flex: none; color: var(--muted); font-size: 11px; white-space: nowrap }
+.permission-policy, .permission-open { padding: 1px 5px; border-radius: 4px; font-weight: 650 }
+.permission-policy { background: var(--bg-subtle) }
+.permission-open {
+  color: var(--failure); background: color-mix(in srgb, var(--bg-canvas) 86%, var(--failure));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--failure) 35%, transparent);
+}
 .task-preview { color: var(--muted); font-size: 11.5px; line-height: 1.4 }
 .queue-note { color: var(--warning) !important }
 .pager {
@@ -212,6 +219,7 @@ button.group-badge:hover { color: var(--accent); background: var(--selection) }
   color: var(--muted); font-size: 11.5px; white-space: nowrap;
 }
 .task-meta .model-badge { flex: none; max-width: 19ch }
+.task-meta:has(.permission-policy, .permission-open) { flex-wrap: wrap; row-gap: 3px }
 .meta-item, .meta-path { display: inline-flex; align-items: center; gap: 4px; min-width: 0 }
 .meta-item { flex: none }
 .meta-path { flex: 0 1 auto }

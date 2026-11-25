@@ -52,6 +52,16 @@ export function modelBadge(task) {
   return el('span', [name, task.effort].filter(Boolean).join(' · '), `model-badge model-${models.get(task.model)?.[1] || 'sol'}`);
 }
 
+export function permissionBadge({ mode, sandbox = mode === 'read' ? 'read-only' : 'workspace-write', approvalPolicy = 'on-request' }) {
+  const fullAccess = sandbox === 'danger-full-access';
+  const scope = fullAccess ? '完全开放' : sandbox === 'read-only' ? '只读' : '可写';
+  const policy = { 'never':'免审批', 'untrusted':'严格审批', 'on-request':fullAccess ? '按需审批' : '' }[approvalPolicy];
+  const node = el('span', [scope, policy].filter(Boolean).join(' · '),
+    `permission-badge${fullAccess ? ' permission-open' : policy ? ' permission-policy' : ''}`);
+  node.title = `${sandbox} · ${approvalPolicy}`;
+  return node;
+}
+
 export function time(value, style = 'clock') {
   const date = new Date(value);
   const options = style === 'clock' ? { hour:'2-digit', minute:'2-digit', second:'2-digit' }

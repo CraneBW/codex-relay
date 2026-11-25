@@ -1,5 +1,5 @@
 import {
-  $, button, copyButton, el, modeLabel, modelBadge, patch, running, setText, stateBadge, time,
+  $, button, copyButton, el, modelBadge, patch, permissionBadge, running, setText, stateBadge, time,
 } from './ui.mjs';
 import { diagnosticEntries, goalEntry, overviewEntries, recordEntries } from './content.mjs';
 import { discussionEntries } from './discussion.mjs';
@@ -34,15 +34,12 @@ function showHeader(task, group, canOpenGraph, onOpenGraph) {
   patch($('task-badges'), badges);
   const fields = [];
   if (task.model) fields.push(['model', [task.model, task.effort], () => modelBadge(task)]);
+  fields.push(['permission', [task.mode, task.sandbox, task.approvalPolicy], () => permissionBadge(task)]);
   if (task.kind === 'discussion' || task.difficulty) {
     fields.push(['kind', task.kind === 'discussion' ? '科研讨论' : difficulty[task.difficulty] || task.difficulty,
       label => el('span', label, 'meta-item')]);
   }
-  if (task.mode) fields.push(['mode', [task.mode, task.holdsWriteLock], () => {
-    const mode = el('span', modeLabel(task), 'meta-item');
-    if (task.holdsWriteLock) mode.append(el('span', '持有写锁', 'lock-label'));
-    return mode;
-  }]);
+  if (task.holdsWriteLock) fields.push(['lock', true, () => el('span', '持有写锁', 'lock-label')]);
   if (task.updated) fields.push(['updated', task.updated, date => {
     const update = el('span', null, 'meta-item meta-updated');
     const wide = el('span', '更新 ', 'meta-wide');

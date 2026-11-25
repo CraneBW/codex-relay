@@ -5,6 +5,11 @@ from probe import ENV, MCP, NOTICES, ORIGIN, PROJECT, TEMP, messages, notice, st
 ENV["CODEX_RELAY_CODEX"]=str(Path(__file__).parent.resolve()/"fake_codex.py")
 
 luna, terra, sol, astra = "gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"
+default_read = ("default", "read-only", "on-request")
+default_write = ("default", "workspace-write", "on-request")
+auto_write = ("auto", "workspace-write", "never")
+full_access = ("full", "danger-full-access", "never")
+access_fields = ("permission", "sandbox", "approvalPolicy")
 
 
 def assert_profile(view, model, effort, difficulty):
@@ -30,6 +35,109 @@ def rejected(call, message):
         assert message in str(e), e
     else:
         raise AssertionError("请求应被拒绝")
+
+
+def assert_access(view, expected):
+    assert tuple(view[key] for key in access_fields) == expected, view
+
+
+def check_access(m, task, expected, thread_method, status="review"):
+    view = m.inspect(task)
+    assert view["status"] == status, view
+    board = m.call("relay_board", {})
+    changes = m.call("relay_board_changes", {"selected": task})
+    displays = [view, changes["selected"], next(t for t in board["tasks"] if t["id"] == task)]
+    if view["graphId"]:
+        for panel in (board, changes):
+            graph = next(g for g in panel["graphs"] if g["graphId"] == view["graphId"] and g["origin"] == ORIGIN)
+            displays.append(next(t for t in graph["nodes"] if t["id"] == task))
+    for display in displays:
+        assert_access(display, expected)
+    _, sandbox, approval = expected
+    turn_params = {"approvalPolicy": approval}
+    if sandbox == "danger-full-access":
+        turn_params["sandboxPolicy"] = {"type": "dangerFullAccess"}
+    turns = json.loads((TEMP / (view["threadId"] + ".history")).read_text())
+    assert turns[-1]["rpcPermissions"] == {
+        thread_method: {"sandbox": sandbox, "approvalPolicy": approval}, "turn/start": turn_params,
+    }, turns[-1]
+    recorded = [event["text"] for event in view["events"] if event["kind"] == "permission"]
+    assert recorded[-1] == " · ".join(expected), recorded
+    return view["threadId"]
+
+
+def check_permissions(m):
+    tools = {tool["name"]: tool for tool in m.req("tools/list", {})["tools"]}
+    for name in ("relay_dispatch", "relay_control"):
+        schema = tools[name]["inputSchema"]
+        assert all(field in schema["properties"] and field not in schema["required"] for field in access_fields)
+    assert all(field not in tools["relay_discuss"]["inputSchema"]["properties"] for field in access_fields)
+
+    cases = [
+        ({"mode": "read"}, default_read),
+        ({"mode": "write"}, default_write),
+        ({"mode": "read", "permission": "auto"}, ("auto", "read-only", "never")),
+        ({"permission": "auto"}, auto_write),
+        ({"permission": "full"}, full_access),
+        ({"approvalPolicy": "untrusted"}, ("custom", "workspace-write", "untrusted")),
+        ({"sandbox": "danger-full-access"}, ("custom", "danger-full-access", "on-request")),
+        ({"permission": "full", "sandbox": "read-only"}, ("custom", "read-only", "never")),
+        ({"permission": "full", "approvalPolicy": "on-request"}, ("custom", "danger-full-access", "on-request")),
+    ]
+    for i, (changes, expected) in enumerate(cases):
+        args = dict(requestKey=f"permission-{i}", title=f"permission-{i}", goal="QUICK", graphId="permissions", **changes)
+        item = m.scoped("relay_dispatch", args)
+        assert_access(item, expected)
+        task = item["id"]
+        notice(task, timeout=12)
+        check_access(m, task, expected, "thread/start")
+        assert m.inspect(task)["holdsWriteLock"] == (args.get("mode", "write") == "write")
+        m.control(task, "accept")
+
+    read = dict(requestKey="invalid-read", title="invalid-read", goal="QUICK", mode="read")
+    for changes in ({"permission": "full"}, {"permission": "full", "sandbox": "read-only"},
+                    {"sandbox": "workspace-write"}, {"sandbox": "danger-full-access"}):
+        rejected(lambda: m.scoped("relay_dispatch", {**read, **changes}), "只读任务")
+    for field, invalid in zip(access_fields, ("custom", "unknown", "always")):
+        rejected(lambda: m.scoped("relay_dispatch", {**read, field: invalid}), field)
+
+    args = dict(requestKey="permission-resume", title="审批阻塞后续跑", goal="NATIVE", graphId="permissions")
+    task = m.scoped("relay_dispatch", args)["id"]
+    notice(task, timeout=12)
+    thread = check_access(m, task, default_write, "thread/start", "blocked")
+    assert "requestApproval" in m.inspect(task)["result"]["summary"]
+    rejected(lambda: m.control(task, "ask_user", "确认权限", permission="full"), "仅用于 resume")
+    m.control(task, "ask_user", "确认所需权限")
+    for changes, expected in [
+        ({"permission": "auto"}, auto_write),
+        ({"permission": "full"}, full_access),
+        ({}, full_access),
+        ({"approvalPolicy": "untrusted"}, ("custom", "danger-full-access", "untrusted")),
+        ({"sandbox": "workspace-write"}, ("custom", "workspace-write", "untrusted")),
+        ({"permission": "default"}, default_write),
+    ]:
+        n = len(messages())
+        assert_access(m.control(task, "resume", "已取得测试用例所需授权，继续原任务", **changes), expected)
+        notice(task, n, timeout=12)
+        assert check_access(m, task, expected, "thread/resume") == thread
+        assert_access(m.scoped("relay_dispatch", {**args, "permission": "default"}), expected)
+        for override in ({"permission": "auto"}, {"sandbox": "danger-full-access"}, {"approvalPolicy": "untrusted"}):
+            rejected(lambda: m.scoped("relay_dispatch", {**args, **override}), "新的 requestKey")
+        with sqlite3.connect(TEMP / "state" / "tasks.sqlite") as db:
+            saved = json.loads(db.execute("SELECT body FROM tasks WHERE id=?", (task,)).fetchone()[0])
+        assert_access(saved, expected)
+        assert (saved["initialSandbox"], saved["initialApprovalPolicy"]) == default_write[1:]
+    m.control(task, "accept")
+
+    reader = m.scoped("relay_dispatch", {**read, "requestKey": "read-resume"})["id"]
+    notice(reader, timeout=12)
+    prior = m.inspect(reader)
+    for changes in ({"permission": "full"}, {"sandbox": "workspace-write"}, {"sandbox": "danger-full-access"}):
+        rejected(lambda: m.control(reader, "resume", "继续核对结果", **changes), "只读任务")
+    assert m.inspect(reader)["noticeId"] == prior["noticeId"]
+    m.control(reader, "accept")
+    print("PASS permission presets, overrides, read guards, idempotency, persistence, original-thread resume, board and RPC")
+    return len(cases) + 2
 
 
 def check_routing(m):
@@ -81,17 +189,23 @@ def check_routing(m):
     task = item["id"]
     notice(task, timeout=12)
     thread, _ = check_profile(m, task, astra, "max", None, "thread/start")
+    check_access(m, task, default_read, "thread/start")
     original_notice = m.inspect(task)["noticeId"]
     for changes in ({"model": sol}, {"effort": "high"}, {"difficulty": "standard"}):
         rejected(lambda: m.control(task, "resume", "核对新证据", **changes), "Astra/max")
+    for changes in ({"permission": "auto"}, {"permission": "full"}, {"sandbox": "workspace-write"},
+                    {"sandbox": "danger-full-access"}, {"approvalPolicy": "never"}, {"approvalPolicy": "untrusted"}):
+        rejected(lambda: m.control(task, "resume", "核对新证据", **changes), "讨论任务权限固定")
     assert m.inspect(task)["noticeId"] == original_notice
     n = len(messages())
-    m.control(task, "resume", "核对新证据", model=astra, effort="max")
+    m.control(task, "resume", "核对新证据", model=astra, effort="max", permission="default",
+              sandbox="read-only", approvalPolicy="on-request")
     notice(task, n, timeout=12)
     same_thread, _ = check_profile(m, task, astra, "max", None, "thread/resume")
     assert same_thread == thread
+    check_access(m, task, default_read, "thread/resume")
     m.control(task, "accept", "已综合双方判断")
-    print("PASS discussion stays on Astra/max and rejects model, effort and difficulty changes")
+    print("PASS discussion stays on Astra/max and read-only/on-request and rejects overrides")
     return len(cases) + 1
 
 
@@ -272,6 +386,7 @@ def check():
         except RuntimeError as e: assert "宿主校验" in str(e)
         else: raise AssertionError("forged context")
         routed_tasks = check_routing(m)
+        permission_tasks = check_permissions(m)
         base = len(messages())
         held=m.dispatch("one","HOLD")["id"]
         assert held==m.dispatch("one","HOLD")["id"]
@@ -308,16 +423,24 @@ def check():
         print("PASS durable outbox retries with no agent polling")
         for how in ["clean","crash"]:
             args={"requestKey":how,"title":how,"goal":"HOLD "+how,"model":terra,"effort":"high"}
+            if how == "crash": args["permission"] = "full"
             t=m.scoped("relay_dispatch",args)["id"];until(lambda: m.inspect(t)["command"])
             thread=m.inspect(t)["threadId"];n=len(messages())
             if how=="clean": worker.terminate()
             else: worker.kill()
             worker.wait(timeout=10)
+            if how == "clean":
+                with sqlite3.connect(TEMP / "state" / "tasks.sqlite") as db:
+                    legacy = json.loads(db.execute("SELECT body FROM tasks WHERE id=?", (t,)).fetchone()[0])
+                    for field in (*access_fields, "initialSandbox", "initialApprovalPolicy"):
+                        legacy.pop(field)
+                    db.execute("UPDATE tasks SET body=? WHERE id=?", (json.dumps(legacy), t))
             worker=start_worker();notice(t,n)
             recovered, _ = check_profile(m, t, terra, "high", "standard", "thread/resume")
             assert recovered==thread and m.scoped("relay_dispatch",args)["id"]==t
+            assert check_access(m, t, default_write if how == "clean" else full_access, "thread/resume") == thread
             m.control(t,"accept")
-        print("PASS orderly exit and crash recovery into the original thread")
+        print("PASS orderly recovery of legacy permissions and crash recovery of full permissions in the original thread")
         won=m.dispatch("finished-before-checkpoint","HOLD checkpoint")["id"]
         until(lambda:m.inspect(won)["command"]); original=m.inspect(won)
         worker.kill();worker.wait()
@@ -335,8 +458,8 @@ def check():
         assert m.inspect(retry)["noticeId"]==event
         m.control(retry,"cancel")
         print("PASS original event survives full restart; Sol ultra and forged context rejected")
-        assert m.call("relay_board",{})["total"]==9+routed_tasks
-        assert m.scoped("relay_inspect",{})["total"]==9+routed_tasks
+        assert m.call("relay_board",{})["total"]==9+routed_tasks+permission_tasks
+        assert m.scoped("relay_inspect",{})["total"]==9+routed_tasks+permission_tasks
         assert m.scoped("relay_inspect",{},str(uuid.uuid4()))["total"]==0
         print("PASS Antigravity can recover its own task list without asking for IDs")
         check_parallel_writes(m)

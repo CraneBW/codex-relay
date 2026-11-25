@@ -1,5 +1,5 @@
 import {
-  $, button, el, graphKey, graphName, modeLabel, modelBadge, patch, plainPreview, queueText, stateBadge, taskLabel,
+  $, button, el, graphKey, graphName, modelBadge, patch, permissionBadge, plainPreview, queueText, stateBadge, taskLabel,
 } from './ui.mjs';
 
 function graphLayers(graph) {
@@ -57,7 +57,7 @@ function updateNode(node, { task, external }) {
   node.classList.toggle('external', external);
   const heading = el('strong', taskLabel(task));
   const flags = el('span', null, 'graph-flags');
-  flags.append(stateBadge(task), el('span', modeLabel(task), 'graph-mode'));
+  flags.append(stateBadge(task), permissionBadge(task));
   if (task.holdsWriteLock) flags.append(el('span', '持有写锁', 'lock-label'));
   if (external) flags.append(el('span', '图外上游', 'graph-mode'));
   const waiting = queueText(task);
@@ -66,8 +66,8 @@ function updateNode(node, { task, external }) {
   node.replaceChildren(heading, modelBadge(task), flags, el('small', progress, waiting ? 'queue-note' : ''));
 }
 
-function nodeView({ id, title, nodeLabel, kind, status, model, effort, mode, holdsWriteLock, current, waitInfo }) {
-  return { id, title, nodeLabel, kind, status, model, effort, mode, holdsWriteLock, current, waitInfo };
+function nodeView({ id, title, nodeLabel, kind, status, model, effort, mode, sandbox, approvalPolicy, holdsWriteLock, current, waitInfo }) {
+  return { id, title, nodeLabel, kind, status, model, effort, mode, sandbox, approvalPolicy, holdsWriteLock, current, waitInfo };
 }
 
 function edgePath(from, to, frame, lock) {
