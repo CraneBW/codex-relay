@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { tail } from './store.mjs';
+import { version } from './version.mjs';
 
 export const resultSchema = {
   type: 'object', additionalProperties: false,
@@ -32,7 +33,7 @@ Only the delegated scope is authorized. Keep commands bound to this run and avoi
 When recovering an interrupted run, inspect existing files, processes and test output before repeating a step.`;
 
 export class Codex {
-  constructor(cwd, onMessage, onExit) {
+  constructor(cwd, onMessage, onExit, onActivity) {
     this.id = 0;
     this.pending = new Map();
     this.stderr = '';
@@ -50,6 +51,7 @@ export class Codex {
     this.lines.on('line', line => {
       let packet;
       try { packet = JSON.parse(line); } catch { return; }
+      onActivity?.();
       const pending = this.pending.get(packet.id);
       if (!packet.method && pending) {
         clearTimeout(pending.timer);
@@ -94,7 +96,7 @@ export class Codex {
   }
 
   async init() {
-    await this.request('initialize', { clientInfo: { name: 'antigravity_codex_relay', version: '0.1.1' },
+    await this.request('initialize', { clientInfo: { name: 'antigravity_codex_relay', version },
       capabilities: { experimentalApi: true } });
     this.send({ method: 'initialized' });
   }

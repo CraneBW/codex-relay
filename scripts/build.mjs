@@ -3,6 +3,11 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
+const { version } = JSON.parse(await readFile('package.json', 'utf8'));
+const plugin = JSON.parse(await readFile('plugin.json', 'utf8'));
+if (!version || plugin.version !== version) {
+  throw Error(`plugin.json 的版本 ${plugin.version} 必须与 package.json 的版本 ${version} 一致。`);
+}
 await mkdir('dist', { recursive: true });
 const server = await build({ entryPoints: ['src/server.mjs'], bundle: true, platform: 'node', format: 'cjs',
   target: 'node22', outfile: 'dist/server.cjs', minify: true, legalComments: 'eof', metafile: true });

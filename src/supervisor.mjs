@@ -3,13 +3,15 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { Codex, discussionInstructions, discussionSchema, instructions, outcome, resultSchema } from './codex.mjs';
 import { astra, codingProfile, sessionPermission, sol, terra } from './models.mjs';
-import { clip, now, tail, taskLabel, terminal } from './store.mjs';
+import { active, clip, now, tail, taskLabel, terminal } from './store.mjs';
 import { inside } from './paths.mjs';
 import { checkContext } from './context.mjs';
 import { requireDirectChild } from './lineage.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const active = new Set(['starting', 'running', 'stopping']);
+const dependencyHeader = '\n\n已验收的上游产出。以下内容供本任务引用。\n';
+const maxDependencyContext = 12000;
+const maxRecentCommands = 5;
 const stoppedResult = (summary, evidence = '', next = '') => ({ outcome: 'blocked', summary: clip(summary), evidence: clip(evidence), next: clip(next) });
 function birth(pid) {
   try { return readFileSync('/proc/' + pid + '/stat', 'utf8').split(') ').at(-1).split(' ')[19]; }
@@ -41,7 +43,11 @@ function taskPermission(a, mode, discussion, previous) {
 }
 
 export class Supervisor {
-  constructor(store) { this.store = store; this.runs = new Map(); this.closing = false; }
+  constructor(store) {
+    this.store = store; this.runs = new Map(); this.closing = false;
+    const idleMs = Number(process.env.CODEX_RELAY_TURN_IDLE_MS || '1800000');
+    this.idleMs = Number.isInteger(idleMs) && idleMs >= 0 && idleMs <= 2147483647 ? idleMs : 1800000;
+  }
 
   async recover() {
     for (const t of this.store.tasks.values()) {
@@ -125,7 +131,8 @@ export class Supervisor {
       kind, mode, model, effort, difficulty, initialModel:model, initialEffort:effort,
       ...access, initialSandbox:access.sandbox, initialApprovalPolicy:access.approvalPolicy,
       status: 'queued', current: '等待执行', created: now(), updated: now(),
-      lease: false, threadId: null, turnId: null, runKey: randomUUID(), prompt: goal, events: [], command: null,
+      startedAt: null, finishedAt: null, turns: 0,
+      lease: false, threadId: null, turnId: null, runKey: randomUUID(), prompt: goal, events: [], command: null, commands: [],
       result: null, savedOutcome: null, intent: null, delivery: null, noticeId: null };
     if (discussion) {
       Object.assign(t, { initialDelegate, initialDelegateOrigin, delegateOrigin: initialDelegateOrigin,
@@ -144,7 +151,7 @@ export class Supervisor {
     if (a.id) {
       const t = this.store.tasks.get(a.id);
       if (!visible(t)) throw Error('当前反重力对话没有这项派单。');
-      return this.store.view(t, true);
+      return this.store.view(t, true, a);
     }
     const all = [...this.store.tasks.values()].filter(visible)
       .sort((a,b) => Number(terminal.has(a.status)) - Number(terminal.has(b.status)) || b.updated.localeCompare(a.updated));
@@ -153,12 +160,17 @@ export class Supervisor {
   }
 
   schedule() {
-    if (this.closing) return;
+    if (this.closing || this.runs.size >= this.store.maxConcurrent) return;
+    const owners = this.store.writeOwners();
     for (const t of this.store.tasks.values()) {
+      if (this.runs.size >= this.store.maxConcurrent) break;
       if (t.status !== 'queued' || t.awaitingDelegate || this.runs.has(t.id)) continue;
-      if (this.store.pendingUpstreams(t).length || this.store.writeBlockers(t).length) continue;
+      if (this.store.pendingUpstreams(t).length || this.store.writeBlockers(t, owners).length) continue;
+      if (t.mode === 'write' && !t.lease) owners.push(t);
       t.lease = true;
       t.status = 'starting'; t.current = t.recovering ? '核对退出前的执行记录' : '正在连接 Codex';
+      t.runStartedAt = now(); t.startedAt ??= t.runStartedAt; t.finishedAt = null;
+      t.durationMs ??= 0;
       this.store.persist(t);
       void this.execute(t);
     }
@@ -168,20 +180,34 @@ export class Supervisor {
     if (!t.dependsOn?.length) return '';
     const sources = t.dependsOn.map(id => {
       const upstream = this.store.tasks.get(id);
-      return { 节点: taskLabel(upstream), 结论: clip(upstream.result?.summary, 360),
-        证据: clip(upstream.result?.evidence, 480), 反重力验收备注: clip(upstream.current, 300) };
+      const source = { 节点: taskLabel(upstream), 结论: clip(upstream.result?.summary, 1200),
+        证据: clip(upstream.result?.evidence, 1600), 反重力验收备注: clip(upstream.current, 1000) };
+      if (upstream.kind === 'discussion') {
+        source.分歧与限制 = clip(upstream.result?.disagreement, 1000);
+        if (upstream.handoff?.note) source.子代理交接纪要 = clip(upstream.handoff.note, 1000);
+      }
+      return source;
     });
-    return '\n\n已验收的上游产出。以下内容供本任务引用。\n' + JSON.stringify(sources, null, 2);
+    const budget = maxDependencyContext - dependencyHeader.length;
+    let payload = JSON.stringify(sources, null, 2);
+    // Shorten all sources together so a long first result cannot crowd out later dependencies.
+    for (let fieldLimit = 1600; payload.length > budget;) {
+      fieldLimit = Math.floor(fieldLimit * budget / payload.length);
+      payload = JSON.stringify(sources.map(source => Object.fromEntries(
+        Object.entries(source).map(([key, value]) => [key, clip(value, fieldLimit)]))), null, 2);
+    }
+    return dependencyHeader + payload;
   }
 
   async execute(t) {
     let end;
     const ended = new Promise(resolve => { end = resolve; });
     let closed;
-    const run = { end, ended, closed: new Promise(resolve => { closed = resolve; }), final: '', rpc: null };
+    const run = { end, ended, closed: new Promise(resolve => { closed = resolve; }), final: '', rpc: null, commandIds: new Set() };
     this.runs.set(t.id, run);
     try {
-      const rpc = new Codex(t.cwd, packet => this.message(t, run, packet), reason => end({ error: reason }));
+      const rpc = new Codex(t.cwd, packet => this.message(t, run, packet), reason => end({ error: reason }),
+        () => { if (!t.intent) run.idleTimer?.refresh(); });
       run.rpc = rpc;
       t.pid = rpc.child.pid || null; t.birth = t.pid ? birth(t.pid) : null;
       this.store.persist(t);
@@ -209,16 +235,18 @@ export class Supervisor {
         const history = await rpc.request('thread/turns/list', { threadId: t.threadId, limit: 6, itemsView: 'full', sortDirection: 'desc' });
         const prior = history.data.find(turn => turn.id === t.turnId || turn.items.some(i =>
           i.type === 'userMessage' && i.content.some(c => c.type === 'text' && c.text.includes(marker))));
+        if (prior) this.recordTurn(t, prior.id);
         if (prior?.status === 'completed') {
           const text = prior.items.filter(i => i.type === 'agentMessage').at(-1)?.text;
           t.savedOutcome = outcome(text) || stoppedResult('已找到结束的执行轮次，需要反重力核对结果。', text);
           this.store.persist(t); return;
         }
         if (prior?.status === 'inProgress' && data.thread.status?.type === 'active') {
-          t.turnId = prior.id; live = true;
+          live = true;
         }
       }
       if (t.intent) return;
+      this.watchIdle(t, run);
       if (!live) {
         const recovery = t.recovering ? '\n上次应用退出中断了执行。先核对已有改动、进程和测试结果，再继续未完成的步骤。' : '';
         const context = initialPrompt ? this.dependencyContext(t) : '';
@@ -228,7 +256,7 @@ export class Supervisor {
         const start = await rpc.request('turn/start', { threadId: t.threadId, model, effort: t.effort,
           approvalPolicy, ...sandboxOverride,
           input: [{ type: 'text', text: marker + '\n' + t.prompt + context + recovery }], outputSchema: discussion ? discussionSchema : resultSchema });
-        t.turnId = start.turn.id;
+        this.recordTurn(t, start.turn.id);
       }
       t.recovering = false;
       if (!t.intent) { t.status = 'running'; if (t.current === '正在连接 Codex' || t.current === '核对退出前的执行记录') t.current = 'Codex 正在执行'; }
@@ -242,11 +270,31 @@ export class Supervisor {
     } catch (e) {
       if (!t.intent && !t.savedOutcome) t.savedOutcome = stoppedResult('Codex 需要反重力处理。', e.message, '检查错误后继续原任务。');
     } finally {
+      clearTimeout(run.idleTimer);
+      run.idleTimer = undefined;
       if (run.rpc) await run.rpc.close();
       this.runs.delete(t.id);
       this.settle(t, false);
       closed();
       this.schedule();
+    }
+  }
+
+  watchIdle(t, run) {
+    if (!this.idleMs || t.intent) return;
+    run.idleTimer = setTimeout(() => {
+      run.idleTimer = undefined;
+      if (this.closing || t.intent || t.savedOutcome) return;
+      this.markStop(t, 'stall', stoppedResult('Codex 轮次无活动超时，已中断。',
+        `连续 ${this.idleMs} 毫秒未收到 Codex RPC 活动。`, '检查最后的命令、输出和工作区进度，确认现场后用 resume 继续原任务。'));
+      void this.interrupt(t, run);
+    }, this.idleMs);
+  }
+
+  recordTurn(t, id) {
+    if (id && t.turnId !== id) {
+      t.turnId = id;
+      t.turns = (t.turns ?? 0) + 1;
     }
   }
 
@@ -268,10 +316,13 @@ export class Supervisor {
     }
     if (p.turnId && t.turnId && p.turnId !== t.turnId) return;
     if (method === 'turn/started') {
-      t.turnId = p.turn.id; this.store.persist(t); return;
+      this.recordTurn(t, p.turn.id); this.store.persist(t); return;
     }
     if (method === 'turn/completed') {
       if (t.turnId && p.turn.id !== t.turnId) return;
+      this.recordTurn(t, p.turn.id);
+      clearTimeout(run.idleTimer);
+      run.idleTimer = undefined;
       if (!t.intent) {
         const text = p.turn.items?.filter(i => i.type === 'agentMessage').at(-1)?.text || run.final;
         t.savedOutcome = p.turn.status === 'completed' ? outcome(text) ||
@@ -286,8 +337,13 @@ export class Supervisor {
       t.current = 'Codex 正在重试 · ' + clip(p.error?.message || p.message, 350);
       this.store.log(t,'retry',t.current); this.store.persist(t); return;
     }
-    if (method === 'item/commandExecution/outputDelta' && t.command?.id === p.itemId) {
-      t.command.output = tail(t.command.output + p.delta); this.store.preview(t); return;
+    if (method === 'item/commandExecution/outputDelta') {
+      const command = t.commands.find(command => command.id === p.itemId);
+      if (command) {
+        command.output = tail(command.output + p.delta);
+        this.store.preview(t);
+      }
+      return;
     }
     if (!['item/started', 'item/completed'].includes(method)) return;
     const item = p.item || {}, finished = method === 'item/completed';
@@ -297,9 +353,17 @@ export class Supervisor {
         t.current = clip(item.text, 400); this.store.log(t, 'message', t.current);
       }
     } else if (item.type === 'commandExecution') {
-      const previous = t.command?.id === item.id ? t.command.output : '';
-      t.command = { id: item.id, text: clip(item.command, 1200), status: item.status,
-        code: item.exitCode ?? null, output: tail(item.aggregatedOutput || previous) };
+      const index = t.commands.findIndex(command => command.id === item.id);
+      if (index < 0 && run.commandIds.has(item.id)) return;
+      run.commandIds.add(item.id);
+      const command = { id: item.id, text: clip(item.command, 1200), status: item.status,
+        code: item.exitCode ?? null, output: tail(item.aggregatedOutput || t.commands[index]?.output) };
+      if (index >= 0) t.commands[index] = command;
+      else {
+        t.commands.push(command);
+        if (t.commands.length > maxRecentCommands) t.commands.shift();
+      }
+      t.command = t.commands.at(-1);
       t.current = finished ? '命令结束，Codex 正在分析结果' : clip(item.command, 400);
       this.store.log(t, 'command', (finished ? '结束 ' + (item.exitCode ?? item.status) : '执行') + ' · ' + item.command);
     } else if (item.type === 'fileChange') {
@@ -329,14 +393,27 @@ export class Supervisor {
 
   settle(t, afterCrash) {
     const intent = t.intent;
+    if (t.runStartedAt) {
+      t.finishedAt = afterCrash ? t.updated : now();
+      t.durationMs = (t.durationMs ?? 0) + Math.max(0, Date.parse(t.finishedAt) - Date.parse(t.runStartedAt));
+      delete t.runStartedAt;
+    }
     t.pid = null; t.birth = null;
     let notify = false, message = null;
     if (intent?.kind === 'cancel') {
       t.status = 'cancelled'; t.lease = false; t.current = '任务已取消';
+      this.store.log(t, 'cancelled', intent.details || t.current);
     } else if (intent?.kind === 'takeover') {
       t.status = 'host'; t.current = '反重力正在临时排障'; this.store.log(t, 'host', intent.details);
-    } else if (intent?.kind === 'native' || t.savedOutcome) {
-      t.result = intent?.kind === 'native' ? intent.details : t.savedOutcome;
+    } else if (intent?.kind === 'native' || intent?.kind === 'stall' || t.savedOutcome) {
+      t.result = ['native', 'stall'].includes(intent?.kind) ? intent.details : t.savedOutcome;
+      if (intent?.kind === 'stall') {
+        t.lease = false;
+        if (t.delegateOrigin) {
+          t.delegateOrigin = null; t.awaitingDelegate = false;
+          this.store.log(t, 'handover', '讨论轮次无活动超时，控制权已交还主对话');
+        }
+      }
       t.status = t.result.outcome === 'done' ? 'review' : 'blocked';
       t.current = t.result.summary; this.store.log(t, t.status, t.current); notify = true;
       if (t.kind === 'discussion' && t.savedOutcome && t.result.disagreement !== undefined) {
@@ -350,6 +427,28 @@ export class Supervisor {
     }
     t.savedOutcome = null; t.intent = null;
     this.store.persist(t, notify, message);
+  }
+
+  cancelQueuedDownstreams(root) {
+    const downstreams = new Map();
+    for (const task of this.store.tasks.values()) {
+      if (task.origin !== root.origin) continue;
+      for (const id of task.dependsOn || []) {
+        if (!downstreams.has(id)) downstreams.set(id, []);
+        downstreams.get(id).push(task);
+      }
+    }
+    const visited = new Set([root.id]);
+    const details = `从上游任务「${taskLabel(root)}」(${root.id}) 级联取消排队任务。`;
+    for (const id of visited) {
+      for (const task of downstreams.get(id) || []) {
+        if (visited.has(task.id)) continue;
+        visited.add(task.id);
+        if (task.status !== 'queued') continue;
+        this.settle({ ...task, events: [...task.events], delegateOrigin: null, awaitingDelegate: false,
+          intent: { kind: 'cancel', details } }, false);
+      }
+    }
   }
 
   async control(a) {
@@ -395,15 +494,21 @@ export class Supervisor {
       if (t.status === 'queued') this.schedule();
     } else if (a.action === 'steer') {
       if (t.status !== 'running' || !run || !a.note?.trim()) throw Error('补充指令需要运行中的 Codex 和指令内容。');
+      run.idleTimer?.refresh();
       await run.rpc.request('turn/steer', { threadId: t.threadId, expectedTurnId: t.turnId, input: [{ type: 'text', text: a.note }] });
       this.store.log(t, 'host', a.note); this.store.persist(t);
     } else if (a.action === 'cancel' || a.action === 'takeover') {
-      if (a.action === 'cancel' && terminal.has(t.status) || a.action === 'takeover' && t.status === 'host') return this.store.view(t);
+      const cascade = a.action === 'cancel' && a.cascade;
+      if (a.action === 'cancel' && terminal.has(t.status) || a.action === 'takeover' && t.status === 'host') {
+        if (cascade) this.cancelQueuedDownstreams(t);
+        return this.store.view(t);
+      }
       if (terminal.has(t.status) || (a.action === 'takeover' && !t.lease)) throw Error('任务尚未获得工作目录，或已结束。');
       if (t.status === 'stopping') throw Error('正在停止 Codex，请待此次接手调用完成。');
       if (discussion) { t.delegateOrigin = null; t.awaitingDelegate = false; }
       this.markStop(t, a.action, a.note || '');
       if (run) { void this.interrupt(t, run); await run.closed; } else this.settle(t, false);
+      if (cascade) this.cancelQueuedDownstreams(t);
       this.schedule();
     } else if (a.action === 'resume') {
       if (!['host', 'blocked', 'waiting_user', 'review'].includes(t.status) || !a.note?.trim()) throw Error('交还任务需要待处理的任务和具体的新线索或用户答复。');

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, sys, uuid
+import json, os, sys, threading, time, uuid
 from pathlib import Path
 
 root=Path(os.environ["RELAY_FIXTURE"])
@@ -15,9 +15,19 @@ def event(name,data): send({"method":name,"params":data})
 def permissions(params):
     return {key: params[key] for key in ("sandbox", "approvalPolicy", "sandboxPolicy") if key in params}
 
+def keep_turn_active(thread_id, turn_id, command_id):
+    for _ in range(20):
+        time.sleep(.1)
+        event("item/commandExecution/outputDelta", dict(threadId=thread_id, turnId=turn_id, itemId=command_id, delta="heartbeat\n"))
+    (root / (thread_id + '.heartbeat')).touch()
+
+
 def finish(kind):
     data={"outcome":kind,"summary":"验证交付" if kind=="done" else "缺输入","evidence":"测试证据","next":"由反重力补输入" if kind=="blocked" else ""}
-    if discussion: data["disagreement"]=""
+    if discussion:
+        data["disagreement"] = ""
+        if "WIDE_CONTEXT" in turn["items"][0]["content"][0]["text"]:
+            data.update(summary="摘要" * 700, evidence="证据" * 900, disagreement="替代解释仍需源数据")
     i={"type":"agentMessage","text":json.dumps(data),"id":"message","phase":"final_answer"}
     event("item/completed", dict(threadId=thread,turnId=turn["id"],item=i))
     turn["items"].append(i); turn["status"]="completed"; save_thread(thread,records)
@@ -48,14 +58,28 @@ for raw in sys.stdin:
         turn["rpcProfiles"]={thread_method:[selected_model,selected_effort],m:[p["model"],p["effort"]]}
         turn["rpcPermissions"]={thread_method:thread_permissions,m:permissions(p)}
         records.append(turn); save_thread(thread,records); reply(x,{"turn":turn}); event("turn/started",dict(threadId=thread,turn=turn))
-        c={"id":"cmd","type":"commandExecution","command":"python -m pytest","status":"inProgress","exitCode":None}
+        c={"id":str(uuid.uuid4()),"type":"commandExecution","command":"python -m pytest","status":"inProgress","exitCode":None}
         event("item/started",dict(threadId=thread,turnId=turn["id"],item=c))
-        event("item/commandExecution/outputDelta",dict(threadId=thread,turnId=turn["id"],itemId="cmd",delta="fixture log\n"))
-        c.update(status="failed",exitCode=1); event("item/completed",dict(threadId=thread,turnId=turn["id"],item=c))
+        event("item/commandExecution/outputDelta",dict(threadId=thread,turnId=turn["id"],itemId=c["id"],delta="fixture log\n"))
+        heartbeat = "HOLD HEARTBEAT" in text
+        if not heartbeat:
+            c.update(status="failed",exitCode=1); event("item/completed",dict(threadId=thread,turnId=turn["id"],item=c))
+        if "MULTI_COMMAND" in text:
+            pending = []
+            for step in range(1, 6):
+                item = dict(id=str(uuid.uuid4()), type="commandExecution", command=f"fixture-step-{step}", status="inProgress")
+                event("item/started", dict(threadId=thread, turnId=turn["id"], item=item))
+                pending.append(item)
+            for step, item in reversed(list(enumerate(pending, 1))):
+                event("item/commandExecution/outputDelta", dict(threadId=thread, turnId=turn["id"], itemId=item["id"], delta=f"output-{step}\n"))
+                item.update(status="failed" if step == 1 else "completed", exitCode=7 if step == 1 else 0)
+                event("item/completed", dict(threadId=thread, turnId=turn["id"], item=item))
         if "原目标" in text or "上次应用退出" in text or "QUICK" in text: finish("done")
         elif "NATIVE" in text:
             send({"id":890,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"turnId":turn["id"],"command":"example","reason":"needs host"}})
         elif "BLOCK" in text: finish("blocked")
+        elif heartbeat:
+            threading.Thread(target=keep_turn_active, args=(thread, turn["id"], c["id"]), daemon=True).start()
         elif "HOLD" not in text: finish("done")
     elif m=="turn/steer":
         reply(x,{"turnId":turn["id"]})

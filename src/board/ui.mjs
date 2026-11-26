@@ -1,8 +1,7 @@
-import { astra, luna, sol, terra } from '../models.mjs';
+import { astra, luna, modelName, sol, terra } from '../models.mjs';
 
 export const $ = id => document.getElementById(id);
 export const running = new Set(['running', 'starting', 'stopping']);
-export const attention = new Set(['blocked', 'waiting_user', 'host', 'review']);
 export const interrupted = new Set(['blocked', 'waiting_user', 'host']);
 export const labels = {
   queued: '排队中', starting: '连接中', running: '执行中', stopping: '正在暂停', blocked: '等待反重力',
@@ -11,12 +10,9 @@ export const labels = {
 const discussionLabels = { running: '讨论中', done: '讨论已结束' };
 export const queueLabels = {
   upstream: '等待上游验收', upstream_blocked: '上游遇到阻塞', upstream_cancelled: '上游已取消', write_lock: '等待目录写锁',
-  awaiting_delegate: '等待子代理认领',
+  awaiting_delegate: '等待子代理认领', concurrency: '等待并发槽位',
 };
-const models = new Map([
-  [astra, ['Astra Max', 'astra']], [sol, ['Sol', 'sol']], [terra, ['Terra', 'terra']], [luna, ['Luna', 'luna']],
-]);
-export const modelName = id => models.get(id)?.[0] || id;
+const modelTones = new Map([[astra, 'astra'], [sol, 'sol'], [terra, 'terra'], [luna, 'luna']]);
 export const taskLabel = task => task.nodeLabel || task.title;
 export function statusLabel(task) {
   if (task.kind === 'discussion' && task.status === 'review') return task.delegateOrigin ? '待子代理回应' : '待主对话定夺';
@@ -53,7 +49,7 @@ export function stateBadge(task, dotOnly = false) {
 
 export function modelBadge(task) {
   const name = modelName(task.model);
-  return el('span', [name, task.effort].filter(Boolean).join(' · '), `model-badge model-${models.get(task.model)?.[1] || 'sol'}`);
+  return el('span', [name, task.effort].filter(Boolean).join(' · '), `model-badge model-${modelTones.get(task.model) || 'sol'}`);
 }
 
 export function delegateLabel(task) {
@@ -223,8 +219,9 @@ export function withKeys(values, identify) {
   const seen = new Map();
   return values.map(value => {
     const key = identify(value);
-    const count = seen.get(key) || 0;
-    seen.set(key, count + 1);
+    const identity = JSON.stringify(key);
+    const count = seen.get(identity) || 0;
+    seen.set(identity, count + 1);
     return [JSON.stringify([key, count]), value];
   });
 }

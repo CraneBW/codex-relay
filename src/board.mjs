@@ -2,22 +2,24 @@ import { App, applyDocumentTheme, applyHostStyleVariables } from '@modelcontextp
 import 'temml/dist/Temml-Local.css';
 import './board/board.css';
 import { $, graphName, setText } from './board/ui.mjs';
-import { createNavigation, matches, orderTasks } from './board/navigation.mjs';
+import { createNavigation, orderTasks } from './board/navigation.mjs';
 import { createDetail } from './board/detail.mjs';
 import { createGraph } from './board/graph.mjs';
+import { version } from './version.mjs';
 
-const app = new App({ name:'Codex 任务', version:'0.1.1' }, {});
+const app = new App({ name:'Codex 任务', version }, {});
 const limit = 30;
+const maxDiscussionLimit = 100;
 let selected, offset = 0, connected = false, generation = 0, poll;
 let board, taskIndex = new Map(), groups = new Map(), frame, queued;
 const details = new Map();
-let criteria = { query:[], filter:'all' };
-let searchCache, scan, scanTimer, scanFailed = false;
+const discussionWindows = new Map();
+let criteria = { query:'', filter:'all', workspace:'' };
 
 const nav = createNavigation({ onSelect:selectTask, onCriteriaChange:filterTasks });
-const graph = createGraph({ onSelect:selectTask, showDetail:nav.showDetail });
-const detail = createDetail({ onSelect:selectTask, onOpenGraph:id => selectTask(id, true) });
-const filtered = () => criteria.query.length || criteria.filter !== 'all';
+const graph = createGraph({ onSelect:selectTask, showDetail:nav.showDetail, onExpansionChange:restart });
+const detail = createDetail({ onSelect:selectTask, onOpenGraph:id => selectTask(id, true), onDiscussionWindow:changeDiscussionWindow });
+const filtered = () => !!(criteria.query || criteria.workspace || criteria.filter !== 'all');
 
 function showError(message) {
   setText($('error'), message || '');
@@ -34,75 +36,18 @@ async function readBoard(args, signal) {
 }
 
 function filterTasks(value) {
+  if (value.query === criteria.query && value.filter === criteria.filter && value.workspace === criteria.workspace) return;
   criteria = value;
-  if (!filtered()) stopScan();
-  paintList();
-  scheduleScan();
-}
-
-function paintList() {
-  if (!board) return;
-  let found;
-  if (filtered()) {
-    const available = new Map((searchCache?.tasks || []).map(task => [task.id, task]));
-    for (const task of board.tasks) available.set(task.id, task);
-    if (board.selected) available.set(board.selected.id, board.selected);
-    found = [...available.values()].filter(task => matches(task, criteria));
-  }
-  const scanning = !!found && board.total > limit && !searchCache;
-  nav.render({
-    tasks:board.tasks, total:board.total, offset:board.offset, limit, selected, filtered:found,
-    scanning:scanning && !scanFailed, scanFailed:scanning && scanFailed,
-  });
-}
-
-function stopScan() {
-  clearTimeout(scanTimer);
-  scanTimer = undefined;
-  scan?.abort();
-  scan = undefined;
-  scanFailed = false;
-}
-
-function scheduleScan() {
-  if (!connected || document.hidden || !filtered() || !board || board.total <= limit || scan || scanTimer
-    || searchCache?.revision === board.revision) return;
-  scanTimer = setTimeout(scanPages, scanFailed ? 1800 : searchCache ? 850 : 140);
-}
-
-async function scanPages() {
-  scanTimer = undefined;
-  const snapshot = board;
-  const controller = new AbortController();
-  scan = controller;
-  try {
-    const tasks = new Map();
-    for (let start = 0; start < snapshot.total; start += limit) {
-      const page = start === snapshot.offset && snapshot.tasks.length <= limit
-        ? snapshot : await readBoard({ offset:start, limit }, controller.signal);
-      for (const task of page.tasks) tasks.set(task.id, task);
-    }
-    if (scan !== controller) return;
-    searchCache = { revision:snapshot.revision, tasks:[...tasks.values()] };
-    scanFailed = false;
-  } catch {
-    if (scan !== controller) return;
-    scanFailed = true;
-  } finally {
-    if (scan === controller) {
-      scan = undefined;
-      paintList();
-      scheduleScan();
-    }
-  }
+  offset = 0;
+  selected = undefined;
+  restart();
 }
 
 function showSelected(loading) {
-  const task = details.get(selected) || (loading
-    ? taskIndex.get(selected) || searchCache?.tasks.find(item => item.id === selected) : undefined);
+  const task = details.get(selected) || (loading ? taskIndex.get(selected) : undefined);
   detail.render({
     id:selected, task, group:groups.get(selected) || task?.graphTitle || task?.graphId,
-    canOpenGraph:groups.has(selected),
+    canOpenGraph:!!task?.graphId,
     pending:!!selected && loading && !details.has(selected),
   });
 }
@@ -112,12 +57,22 @@ function selectTask(id, openGraph = false) {
   selected = id;
   nav.showDetail();
   nav.select(id);
+  const wasExpanded = graph.expanded;
   graph.select(id, openGraph);
-  if (changed) {
-    showSelected(true);
-    restart();
-  }
+  if (changed) showSelected(true);
+  if (changed || wasExpanded !== graph.expanded) restart();
   if (!openGraph && matchMedia('(max-width: 639px)').matches) requestAnimationFrame(detail.focusHeading);
+}
+
+function changeDiscussionWindow(task, latest) {
+  if (task.id !== selected) return;
+  const size = task.discussion.length;
+  const discussionLimit = Math.min(maxDiscussionLimit, Math.max(size * 2, task.discussionTotal || 0));
+  const discussionOffset = latest || size < maxDiscussionLimit ? 0 : (task.discussionOffset || 0) + task.discussion.length;
+  const previous = discussionWindows.get(selected);
+  if (previous?.discussionLimit === discussionLimit && previous.discussionOffset === discussionOffset) return;
+  discussionWindows.set(selected, { discussionLimit, discussionOffset });
+  restart();
 }
 
 function receive(data, answeredSelection) {
@@ -128,7 +83,7 @@ function receive(data, answeredSelection) {
   board = data;
   taskIndex = new Map();
   groups = new Map();
-  for (const g of data.graphs) {
+  for (const g of data.graphs || []) {
     for (const task of g.nodes) {
       taskIndex.set(task.id, task);
       groups.set(task.id, graphName(g));
@@ -139,15 +94,16 @@ function receive(data, answeredSelection) {
   if (data.selected?.id === selected && data.selected) {
     details.delete(selected);
     details.set(selected, data.selected);
-    if (details.size > 16) details.delete(details.keys().next().value);
+    if (details.size > 16) {
+      const evicted = details.keys().next().value;
+      details.delete(evicted);
+      discussionWindows.delete(evicted);
+    }
   } else if (selected && answeredSelection === selected) details.delete(selected);
-  if (board.total <= limit) searchCache = undefined;
-
   showError('');
-  paintList();
-  graph.render(data.graphs, selected);
+  nav.render({ ...data, limit, selected, filtered:filtered() });
+  graph.render(data.graphs || [], data.hasGraphs ?? !!data.graphs?.length, selected);
   showSelected(answeredSelection !== selected);
-  scheduleScan();
 }
 
 function queueBoard(data, token, requestedId) {
@@ -170,13 +126,14 @@ async function follow(token) {
     try {
       poll = new AbortController();
       const requestedId = selected;
-      const args = { offset, limit };
-      if (requestedId) args.selected = requestedId;
+      const args = { offset, limit, ...criteria, includeGraphs:graph.expanded };
+      if (requestedId) Object.assign(args, { selected:requestedId }, discussionWindows.get(requestedId));
       if (revision) args.revision = revision;
       const data = await readBoard(args, poll.signal);
       if (token !== generation) return;
-      if (offset && offset >= data.total) {
-        offset = Math.max(0, Math.floor((data.total - 1) / limit) * limit);
+      const total = data.filteredTotal ?? data.total;
+      if (offset && offset >= total) {
+        offset = Math.max(0, Math.floor((total - 1) / limit) * limit);
         selected = undefined;
         revision = undefined;
         continue;
@@ -230,15 +187,10 @@ app.ontoolresult = response => {
   if (connected) restart();
 };
 app.onhostcontextchanged = theme;
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopScan();
-  restart();
-  if (!document.hidden) scheduleScan();
-});
+document.addEventListener('visibilitychange', restart);
 window.addEventListener('pagehide', () => {
   generation++;
   poll?.abort();
-  stopScan();
 });
 window.addEventListener('pageshow', event => { if (event.persisted) restart(); });
 app.connect().then(() => {

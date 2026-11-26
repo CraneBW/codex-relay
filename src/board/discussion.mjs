@@ -8,10 +8,10 @@ const speakerBadge = actor => el('span', speakers[actor], `model-badge model-${a
 const letters = new Intl.NumberFormat('zh-CN');
 const characters = text => [...text.replace(/\s/g, '')].length;
 
-function getRounds(task) {
+export function getRounds(task) {
   const messages = task.discussion || [];
   const last = messages.at(-1);
-  const final = task.status === 'done' && last && actorOf(last) === 'main' ? last : null;
+  const final = task.status === 'done' && !task.discussionOffset && last && actorOf(last) === 'main' ? last : null;
   const replies = final ? messages.slice(0, -1) : messages;
   const rounds = [];
   const keys = withKeys(replies, message => [message.at, actorOf(message), message.body.slice(0, 80)]);
@@ -19,7 +19,7 @@ function getRounds(task) {
     if (!rounds.length || actorOf(message) !== 'astra') rounds.push({ key, messages:[] });
     rounds.at(-1).messages.push([key, message]);
   }
-  return { rounds, final, capped:messages.length >= 8, count:replies.length };
+  return { rounds, final, capped:task.discussionTruncated ?? messages.length >= 8, count:replies.length };
 }
 
 function messageBody(message, repeated = false) {
@@ -108,14 +108,20 @@ function roundEntry(round, preferences) {
   }, update];
 }
 
-function historyEntry(data, preferences) {
-  if (!data.rounds.length) return [];
+function historyEntry(data, preferences, changeWindow) {
+  if (!data.rounds.length && !data.offset) return [];
   const update = (root, value) => {
     const list = root.querySelector('.round-list');
     const actions = root.querySelector('.round-actions');
-    const capped = root.querySelector('.history-window');
+    const window = root.querySelector('.history-window');
+    const earlier = window.querySelector('.earlier-messages');
+    const latest = window.querySelector('.latest-messages');
     actions.hidden = value.count <= 2;
-    capped.hidden = !value.capped;
+    window.hidden = !value.capped && !value.offset;
+    earlier.hidden = !value.capped;
+    latest.hidden = !value.offset;
+    earlier.onclick = () => changeWindow(false);
+    latest.onclick = () => changeWindow(true);
 
     function paintRounds() {
       patch(list, value.rounds.map((round, i) => roundEntry({
@@ -148,13 +154,15 @@ function historyEntry(data, preferences) {
       actions.append(control);
     }
     header.append(el('h3', '讨论记录'), actions);
-    root.append(header, el('p', '面板最多显示最近 8 条发言。', 'history-window'), el('div', null, 'round-list'));
+    const window = el('div', null, 'history-window');
+    window.append(button('加载更早发言', 'text-control earlier-messages'), button('返回最新发言', 'text-control latest-messages'));
+    root.append(header, window, el('div', null, 'round-list'));
     update(root, value);
     return root;
   }, update]];
 }
 
-export function discussionEntries(task, tab, { state }) {
+export function discussionEntries(task, tab, { state, onDiscussionWindow }) {
   const { rounds, final, capped, count } = getRounds(task);
   const consensus = consensusEntry(task, final, tab === 'consensus');
   const handoff = hasText(task.handoff?.note) ? [['handoff', task.handoff.note, note => {
@@ -169,9 +177,9 @@ export function discussionEntries(task, tab, { state }) {
   const repeated = task.status === 'done' && last && actorOf(last) === 'astra' && last.body === concatenated.slice(0, 16000)
     ? last.body : '';
   return [
-    ...progressEntry(task, rounds.length, capped),
+    ...(!task.discussionOffset ? progressEntry(task, rounds.length, capped) : []),
     ...(task.status === 'done' ? consensus : []),
     ...handoff,
-    ...historyEntry({ rounds, capped, count, repeated }, state),
+    ...historyEntry({ rounds, capped, count, repeated, offset:task.discussionOffset }, state, latest => onDiscussionWindow(task, latest)),
   ];
 }

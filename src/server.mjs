@@ -6,8 +6,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { socketPath } from './paths.mjs';
 import { approvalPolicies, codingModels, difficulties, efforts, permissions, sandboxModes } from './models.mjs';
+import { version } from './version.mjs';
 
-const server = new McpServer({ name: 'codex-relay', version: '0.1.1' });
+const server = new McpServer({ name: 'codex-relay', version });
 const uri = 'ui://codex-relay/board.html';
 const panelPath = join(dirname(process.argv[1]), 'board.html');
 const context = {
@@ -22,6 +23,12 @@ const graph = {
   dependsOn: z.array(z.string().trim().min(1).max(140)).max(24).optional().describe('同一对话内已有上游任务的 UUID 或 requestKey。全部验收后启动。'),
 };
 const taskId = z.string().uuid();
+const discussionWindow = {
+  discussionLimit: z.number().int().min(1).max(100).optional()
+    .describe('任务详情的发言条数，默认 8，最多 100；每页按发言先后顺序返回。'),
+  discussionOffset: z.number().int().nonnegative().optional()
+    .describe('任务详情从最新发言向前跳过的条数，默认 0，返回最近一页。discussionTruncated 表示本页前还有更早发言。'),
+};
 const appOnly = { ui: { visibility: ['app'] } };
 const modelOnly = { ui: { visibility: ['model'] } };
 const codingRoutes = 'simple 为 Luna/low（简单修改），browser 为 Terra/medium（实际点击、填表或截图验收，纯前端开发按难度选择），standard 为 Sol/high（常规开发和调试，默认），hard 为 Sol/xhigh，exceptional 为 Sol/max。';
@@ -77,10 +84,11 @@ register('relay_discuss', '邀请 Astra Max 与反重力讨论实验、结果或
   cwd:z.string().max(4096).optional(), ...graph, ...context,
 }, 'discuss');
 register('relay_inspect', '读取本对话派发或当前委托给本对话的任务。省略 id 查看列表，指定 id 查看结果、证据与活动。按事件或用户请求查询。', {
-  id:taskId.optional(), offset:z.number().int().nonnegative().optional(), ...context,
+  id:taskId.optional(), offset:z.number().int().nonnegative().optional(), ...discussionWindow, ...context,
 }, 'inspect');
 register('relay_control', 'steer 追加指令，takeover 等 Codex 停止后交出工作区，resume 在原会话续跑，ask_user 标记等待用户，accept 验收并放行符合条件的下游，cancel 取消。讨论任务的直系子代理可 claim、resume，结束代聊时用 handover 交还控制权并写明可能过严的前提和替代视角。主对话可主动 handover 收回控制权。交接后由主对话反思自身预设，跳出原框定比较替代路径，再用 accept 写定论并放行下游。讨论的 accept 或 cancel 由主对话负责。编码续跑可独立覆盖 model 和 effort。给出 difficulty 时，省略的参数按新难度取默认值，否则沿用上一轮对应值。权限参数仅用于 resume。给出 permission 时，省略的权限项按预设取值，否则逐项沿用上轮。' + permissionPresets + ' 讨论续跑固定 Astra/max、read-only、on-request。', {
   id: taskId, action: z.enum(['steer','takeover','resume','ask_user','accept','cancel','claim','handover']),
+  cascade: z.boolean().optional().describe('用于 cancel。为 true 时一并取消同一对话内仍在排队的直接和间接下游。默认 false。'),
   note: z.string().max(10000).optional(), expectedNotice: z.string().uuid().optional().describe('从通知操作任务时填写通知事件 ID。'), ...context,
   difficulty: z.enum(difficulties).optional().describe('用于编码续跑。省略时保留上一轮难度。' + codingRoutes),
   model: z.enum(codingModels).optional().describe('resume 独立指定下一轮模型。编码任务可指定 gpt-6.2-astra（Astra Max）。省略时按新难度取默认模型，未改难度时沿用上一轮。讨论任务固定使用 gpt-6.2-astra。'),
@@ -93,12 +101,17 @@ server.registerResource('Codex 任务面板', uri, { mimeType: 'text/html;profil
 server.registerTool('relay_board', { title: 'Codex 任务', description: '打开反重力所派 Codex 任务的只读侧面板。', inputSchema: {},
   _meta: { ui: { resourceUri: uri }, 'com.google.antigravity/ui': { entrypoints: [{ type: 'aux_pane', title: 'Codex 任务' }] } },
 }, async (_, extra) => {
-  try { const { total } = await request('board', {}, extra.signal); return result({ total }, '任务面板，共 ' + total + ' 项。'); }
+  try { const { total } = await request('board', { includeGraphs: false, limit: 1 }, extra.signal); return result({ total }, '任务面板，共 ' + total + ' 项。'); }
   catch (e) { return result({ offline: e.message }, e.message); }
 });
 server.registerTool('relay_board_changes', { description: '面板读取或等待任务状态变化。', _meta: appOnly,
   inputSchema: { selected: taskId.optional(), revision: z.string().max(100).optional(),
-    offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(40) },
+    offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(40),
+    filter: z.enum(['all', 'active', 'attention', 'done']).optional().describe('任务列表的状态筛选，默认 all。'),
+    query: z.string().max(4096).optional().describe('忽略大小写，所有空白分隔的关键词均须匹配。'),
+    workspace: z.string().max(4096).optional().describe('按工作目录筛选，包含该目录及子目录。'),
+    includeGraphs: z.boolean().optional().describe('默认返回完整依赖图。为 false 时 graphs 为空数组，hasGraphs 仍表示是否有任务群。'),
+    ...discussionWindow },
 }, async (args, extra) => {
   try { return result(await request('board', args, extra.signal), '任务视图已更新。'); } catch (e) { return failure(e); }
 });

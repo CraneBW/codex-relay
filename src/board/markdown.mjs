@@ -65,7 +65,9 @@ function mathToken(src, block, literal) {
   return { type:block ? 'displayMath' : 'inlineMath', raw, formula:match[1].trim(), display };
 }
 
-function mathExtension(block, formulas) {
+let activeFormulas;
+
+function mathExtension(block) {
   return {
     name:block ? 'displayMath' : 'inlineMath',
     level:block ? 'block' : 'inline',
@@ -78,7 +80,7 @@ function mathExtension(block, formulas) {
       return mathToken(src, block, this.lexer.state.inRawBlock);
     },
     renderer(token) {
-      const i = formulas.push(token) - 1;
+      const i = activeFormulas.push(token) - 1;
       const tag = block ? 'div' : 'span';
       return `<${tag} data-board-math="${i}"></${tag}>`;
     },
@@ -182,16 +184,24 @@ function decorate(fragment, formulas) {
   }
 }
 
+const parser = new Marked({
+  gfm:true, async:false,
+  renderer:{ code, image:({ text }) => escapeHtml(text) },
+  extensions:[mathExtension(true), mathExtension(false), cjkStrong],
+});
+
+export function parseMarkdown(value, formulas) {
+  const previous = activeFormulas;
+  activeFormulas = formulas;
+  try { return parser.parse(value); }
+  finally { activeFormulas = previous; }
+}
+
 export function prose(value) {
   const formulas = [];
-  const parser = new Marked({
-    gfm:true,
-    renderer:{ code, image:({ text }) => escapeHtml(text) },
-    extensions:[mathExtension(true, formulas), mathExtension(false, formulas), cjkStrong],
-  });
   const content = el('div', null, 'prose');
   try {
-    const fragment = DOMPurify.sanitize(parser.parse(value), markdownPolicy);
+    const fragment = DOMPurify.sanitize(parseMarkdown(value, formulas), markdownPolicy);
     decorate(fragment, formulas);
     content.append(fragment);
   } catch {

@@ -2,6 +2,8 @@ export const sol = 'gpt-6.2-sol';
 export const astra = 'gpt-6.2-astra';
 export const luna = 'gpt-6-luna';
 export const terra = 'gpt-6.1-terra';
+const modelNames = new Map([[astra, 'Astra Max'], [sol, 'Sol'], [terra, 'Terra'], [luna, 'Luna']]);
+export const modelName = id => modelNames.get(id) || id;
 export const codingModels = [luna, terra, sol, astra];
 export const efforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const permissions = ['default', 'auto', 'full'];

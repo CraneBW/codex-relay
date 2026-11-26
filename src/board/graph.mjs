@@ -3,7 +3,7 @@ import {
   stateBadge, statusLabel, taskLabel,
 } from './ui.mjs';
 
-function graphLayers(graph) {
+export function graphLayers(graph) {
   const external = graph.externalNodes || [];
   const nodes = [...external, ...graph.nodes];
   const ids = new Set(nodes.map(node => node.id));
@@ -62,7 +62,7 @@ function updateNode(node, { task, external }) {
   const delegation = delegateLabel(task);
   if (delegation && delegation !== statusLabel(task)) flags.append(delegateBadge(task));
   if (task.holdsWriteLock) flags.append(el('span', '持有写锁', 'lock-label'));
-  if (external) flags.append(el('span', '图外上游', 'graph-mode'));
+  if (external) flags.append(el('span', '图外任务', 'graph-mode'));
   const waiting = queueText(task);
   const progress = waiting || plainPreview(task.current, 100);
   node.title = [taskLabel(task), progress].filter(Boolean).join('\n');
@@ -94,12 +94,15 @@ function edgePath(from, to, frame, lock) {
   return `M${x} ${y} C${x} ${mid} ${endX} ${mid} ${endX} ${endY}`;
 }
 
-export function createGraph({ onSelect, showDetail }) {
+export function createGraph({ onSelect, showDetail, onExpansionChange }) {
   const toggle = $('graph-toggle');
   const section = $('graphs');
   const picker = $('graph-select');
   const scroll = $('graph-scroll');
   const canvas = $('graph-canvas');
+  const legend = $('graph-legend');
+  const lockLegend = legend.querySelector('.lock-legend');
+  const loading = $('graph-loading');
   const edges = svg('svg', { class:'graph-edges', 'aria-hidden':'true' });
   const defs = svg('defs', {});
   defs.append(marker('dependency-arrow', 'dependency-arrow'), marker('lock-arrow', 'lock-arrow'));
@@ -110,7 +113,7 @@ export function createGraph({ onSelect, showDetail }) {
   canvas.append(rows);
 
   const positions = new Map();
-  let graphs = [], activeGraph, renderedGraph, selected, expanded = false, visible, frame;
+  let graphs = [], available = false, activeGraph, renderedGraph, selected, expanded = false, visible, frame, requestedGraphTask;
 
   function scheduleEdges() {
     if (frame || section.hidden) return;
@@ -137,6 +140,7 @@ export function createGraph({ onSelect, showDetail }) {
         }
       }
       patch(paths, entries);
+      lockLegend.hidden = !paths.querySelector('.lock-edge');
     });
   }
 
@@ -147,11 +151,14 @@ export function createGraph({ onSelect, showDetail }) {
   }
 
   function paint() {
-    const available = !!graphs.length;
     toggle.hidden = !available;
     toggle.setAttribute('aria-expanded', String(expanded && available));
     section.hidden = !expanded || !available;
     if (section.hidden) return;
+    const pending = !graphs.length;
+    picker.hidden = scroll.hidden = legend.hidden = pending;
+    loading.hidden = !pending;
+    if (pending) return;
     const names = new Map();
     for (const g of graphs) names.set(graphName(g), (names.get(graphName(g)) || 0) + 1);
     patch(picker, graphs.map(g => {
@@ -163,7 +170,9 @@ export function createGraph({ onSelect, showDetail }) {
         return option;
       }];
     }));
-    const graph = graphs.find(g => graphKey(g) === activeGraph)
+    const requested = requestedGraphTask && graphs.find(g => g.nodes.some(task => task.id === requestedGraphTask));
+    requestedGraphTask = undefined;
+    const graph = requested || graphs.find(g => graphKey(g) === activeGraph)
       || graphs.find(g => g.nodes.some(task => task.id === selected)) || graphs[0];
     activeGraph = graphKey(graph);
     picker.value = activeGraph;
@@ -178,48 +187,57 @@ export function createGraph({ onSelect, showDetail }) {
       paintLayer(node, tasks);
       return node;
     }, paintLayer]));
-    $('graph-legend').querySelector('.lock-legend').hidden = !layers.some(layer =>
-      layer.some(task => task.waitInfo?.kind === 'write_lock'));
     if (switched) scroll.scrollTo(...(positions.get(activeGraph) || [0, 0]));
+    if (switched) lockLegend.hidden = true;
     renderedGraph = activeGraph;
     setSelection();
     scheduleEdges();
+    if (requested) scrollToSelection();
+  }
+
+  function scrollToSelection() {
+    if (section.hidden || scroll.hidden) return;
+    const node = rows.querySelector('.graph-node[aria-pressed="true"]');
+    if (!node) return;
+    const bounds = node.getBoundingClientRect(), view = scroll.getBoundingClientRect();
+    scroll.scrollBy({
+      left:Math.min(0, bounds.left - view.left) || Math.max(0, bounds.right - view.right + 10),
+      top:Math.min(0, bounds.top - view.top) || Math.max(0, bounds.bottom - view.bottom + 10),
+      behavior:matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+    });
   }
 
   toggle.onclick = () => {
     expanded = !expanded;
     if (expanded) showDetail();
+    else requestedGraphTask = undefined;
     paint();
+    onExpansionChange();
   };
   picker.onchange = () => { activeGraph = picker.value; paint(); };
   new ResizeObserver(scheduleEdges).observe(canvas);
 
   return {
-    render(data, id) {
+    get expanded() { return expanded; },
+    render(data, hasGraphs, id) {
       graphs = data;
+      available = hasGraphs;
       selected = id;
       paint();
     },
     select(id, open = false) {
       selected = id;
+      if (open) {
+        requestedGraphTask = id;
+        expanded = true;
+      } else requestedGraphTask = undefined;
       const graph = graphs.find(g => graphKey(g) === activeGraph);
-      if (open || !graph || ![...graph.nodes, ...(graph.externalNodes || [])].some(task => task.id === id)) {
+      if (!open && (!graph || ![...graph.nodes, ...(graph.externalNodes || [])].some(task => task.id === id))) {
         const owner = graphs.find(g => g.nodes.some(task => task.id === id));
-        if (owner) {
-          activeGraph = graphKey(owner);
-          if (open) expanded = true;
-        }
+        if (owner) activeGraph = graphKey(owner);
       }
       paint();
-      if (section.hidden) return;
-      const node = rows.querySelector('.graph-node[aria-pressed="true"]');
-      if (!node) return;
-      const bounds = node.getBoundingClientRect(), view = scroll.getBoundingClientRect();
-      scroll.scrollBy({
-        left:Math.min(0, bounds.left - view.left) || Math.max(0, bounds.right - view.right + 10),
-        top:Math.min(0, bounds.top - view.top) || Math.max(0, bounds.bottom - view.bottom + 10),
-        behavior:matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
-      });
+      if (!open) scrollToSelection();
     },
   };
 }

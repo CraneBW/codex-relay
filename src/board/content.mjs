@@ -6,10 +6,10 @@ import { prose } from './markdown.mjs';
 
 const eventLabels = {
   model:'模型', permission:'会话权限', command:'命令', file:'文件', tool:'工具', host:'反重力', accepted:'验收',
-  blocked:'阻塞', review:'交付', retry:'重试', message:'消息', user:'用户',
-  delegate:'讨论委托', handover:'控制权交接',
+  blocked:'阻塞', review:'交付', retry:'重试', message:'消息', user:'用户', cancelled:'取消',
+  delegate:'讨论委托', handover:'控制权交接', delivery:'通知投递',
 };
-const deliveryLabels = { pending:'等待投递唤醒通知', sent:'已投递唤醒通知', retry:'正在重试唤醒通知' };
+const deliveryLabels = { pending:'等待投递唤醒通知', sent:'已投递唤醒通知', retry:'正在重试唤醒通知', failed:'唤醒通知投递失败' };
 const failedCommand = new Set(['failed', 'declined', 'interrupted']);
 
 export const hasText = value => typeof value === 'string' && !!value.trim();
@@ -106,13 +106,14 @@ function commandStatus({ command, status }) {
   }[command.status] || '无退出码', failedCommand.has(command.status) ? 'failure' : 'neutral'];
 }
 
-function commandEntry(task, context) {
-  if (!task.command?.text && !task.command?.output) return [];
-  const id = String(task.command.id ?? task.command.text);
+function commandEntry(task, context, command = task.command, latest = true) {
+  if (!command?.text && !command?.output) return [];
+  const id = String(command.id ?? command.text);
   const { outputs } = context.state;
   if (!outputs.has(id)) outputs.set(id, { expanded:false });
   const state = outputs.get(id);
   const update = (root, data) => {
+    setText(root.querySelector('h3'), data.latest ? '最近命令' : '此前命令');
     const [label, tone] = commandStatus(data);
     const mark = root.querySelector('.command-status');
     setText(mark, label);
@@ -124,10 +125,10 @@ function commandEntry(task, context) {
     input.hidden = !data.command.text;
     output.hidden = !data.command.output;
   };
-  return [[`command-${id}`, { command:task.command, status:task.status }, data => {
+  return [[`command-${id}`, { command, status:task.status, latest }, data => {
     const root = section(null, 'command-block');
     const heading = el('div', null, 'section-line');
-    heading.append(el('h3', '最近命令'), el('span', null, 'command-status'));
+    heading.append(el('h3'), el('span', null, 'command-status'));
     root.append(heading, rawBlock('命令', true), rawBlock('输出', false, state));
     update(root, data);
     return root;
@@ -136,7 +137,7 @@ function commandEntry(task, context) {
 
 function eventTone(event) {
   if (event.kind === 'accepted' || event.kind === 'review') return 'ok';
-  if (['blocked', 'retry'].includes(event.kind)) return 'failure';
+  if (['blocked', 'retry', 'delivery'].includes(event.kind)) return 'failure';
   if (event.kind === 'command') {
     const match = /^结束\s+(-?\d+|failed|declined|interrupted)\b/.exec(event.text || '');
     if (match) return Number(match[1]) === 0 ? 'ok' : 'failure';
@@ -185,7 +186,8 @@ function timelineEntry(events, recent = false) {
 }
 
 export function recordEntries(task, context) {
-  return [...commandEntry(task, context), ...timelineEntry(task.events)];
+  const commands = task.commands?.length ? [...task.commands].reverse() : [task.command];
+  return [...commands.flatMap((command, index) => commandEntry(task, context, command, index === 0)), ...timelineEntry(task.events)];
 }
 
 function recordLink(task, { showTab }) {
@@ -231,7 +233,7 @@ function queuedEntries(task, { onSelect }) {
     root.append(el('p', (wait && queueLabels[wait.kind]) || current || '等待调度'));
     const blockers = wait?.blockers || [];
     const refs = new Map((upstreams || []).map(ref => [ref.id, ref]));
-    if (wait?.kind === 'write_lock') root.append(taskLinks(blockers, onSelect));
+    if (['write_lock', 'concurrency'].includes(wait?.kind)) root.append(taskLinks(blockers, onSelect));
     else for (const ref of blockers) if (!refs.has(ref.id)) refs.set(ref.id, ref);
     if (refs.size) {
       root.append(el('h4', '前置依赖'), taskLinks([...refs.values()], onSelect));
@@ -303,6 +305,14 @@ function patchFields(list, values) {
     .map(data => [data[0], data, diagnosticField]));
 }
 
+export function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return ms + ' 毫秒';
+  const seconds = Math.floor(ms / 1000);
+  const hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds / 60) % 60;
+  return [hours ? hours + ' 小时' : '', minutes ? minutes + ' 分' : '', seconds % 60 + ' 秒'].filter(Boolean).join(' ');
+}
+
 export function diagnosticEntries(task, { onSelect }) {
   const completed = task.status === 'done' && task.events?.findLast(event => event.kind === 'accepted')?.time;
   const entries = [];
@@ -310,6 +320,8 @@ export function diagnosticEntries(task, { onSelect }) {
     ['任务 ID', task.id, 'raw'], ['线程 ID', task.threadId, 'raw'], ['轮次 ID', task.turnId, 'raw'],
     ['完整模型 ID', task.model, 'raw'], ['工作目录', task.cwd, 'raw'],
     ['创建时间', task.created, 'time'], ['更新时间', task.updated, 'time'], ['完成时间', completed || '', 'time'],
+    ['开始执行', task.startedAt, 'time'], ['结束执行', task.finishedAt, 'time'],
+    [running.has(task.status) ? '已结束的执行耗时' : '执行耗时', formatDuration(task.durationMs)], ['执行轮次', task.turns],
     ['任务模式', modeLabel(task)], ['沙盒模式', task.sandbox, 'raw'], ['审批策略', task.approvalPolicy, 'raw'],
     ['目录写锁', task.holdsWriteLock ? '持有' : '未持有'],
   ];

@@ -1,22 +1,15 @@
 import {
-  $, attention, button, delegateBadge, delegateLabel, el, modelBadge, modelName, patch, permissionBadge, plainPreview, queueText, readSetting, running,
+  $, button, delegateBadge, delegateLabel, el, modelBadge, patch, permissionBadge, plainPreview, queueText, readSetting,
   setText, stateBadge, statusLabel, taskLabel, writeSetting,
 } from './ui.mjs';
 
-const ranks = ['blocked', 'waiting_user', 'host', 'running', 'starting', 'stopping', 'review', 'queued', 'done', 'cancelled'];
+const ranks = ['blocked', 'waiting_user', 'host', 'running', 'starting', 'stopping', 'review', 'queued', 'upstream_cancelled', 'done', 'cancelled'];
+const upstreamCancelled = task => task.status === 'queued' && task.waitInfo?.kind === 'upstream_cancelled';
 const rank = task => {
-  const index = ranks.indexOf(task.status);
+  const index = ranks.indexOf(upstreamCancelled(task) ? 'upstream_cancelled' : task.status);
   return index === -1 ? ranks.length : index;
 };
 export const orderTasks = tasks => [...tasks].sort((a, b) => rank(a) - rank(b));
-
-export function matches(task, { query, filter }) {
-  if (filter === 'active' && !running.has(task.status) && task.status !== 'queued') return false;
-  if (filter === 'attention' && !attention.has(task.status)) return false;
-  if (filter === 'done' && task.status !== 'done') return false;
-  const text = [task.title, task.nodeLabel, task.model, modelName(task.model), task.effort, task.cwd].join(' ').toLowerCase();
-  return query.every(word => text.includes(word));
-}
 
 function taskRow(task, onSelect) {
   const row = button(null, 'task');
@@ -36,6 +29,7 @@ function updateTaskRow(row, task) {
   const title = task.title || taskLabel(task);
   setText(row.querySelector('strong'), title);
   row.title = title;
+  row.classList.toggle('upstream-cancelled', upstreamCancelled(task));
   const light = row.querySelector('.task-light');
   if (light.firstElementChild?.title !== statusLabel(task)) light.replaceChildren(stateBadge(task, true));
   patch(row.querySelector('.task-model'), [
@@ -55,8 +49,9 @@ export function createNavigation({ onSelect, onCriteriaChange }) {
   const scroll = $('list-scroll');
   const filterBar = $('filters');
   const search = $('search');
+  const workspacePicker = $('workspace-filter');
   const compact = matchMedia('(max-width: 639px)');
-  let filter = 'all';
+  let filter = 'all', searchTimer;
   let visibleBeforeSwitch = 0;
   const groups = ['active', 'done', 'cancelled'].map(id => {
     const node = $(`${id}-group`);
@@ -82,17 +77,22 @@ export function createNavigation({ onSelect, onCriteriaChange }) {
       },
     };
   });
-  const criteria = () => ({
-    query:search.value.toLowerCase().trim().split(/\s+/).filter(Boolean), filter,
-  });
-  search.oninput = () => { scroll.scrollTop = 0; onCriteriaChange(criteria()); };
+  function applyCriteria() {
+    clearTimeout(searchTimer);
+    scroll.scrollTop = 0;
+    onCriteriaChange({ query:search.value.trim(), filter, workspace:workspacePicker.value });
+  }
+  search.oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(applyCriteria, 160);
+  };
+  workspacePicker.onchange = applyCriteria;
   filterBar.onclick = event => {
     const chip = event.target.closest('[data-filter]');
     if (!chip || filter === chip.dataset.filter) return;
     filter = chip.dataset.filter;
     for (const other of filterBar.children) other.setAttribute('aria-pressed', String(chip === other));
-    scroll.scrollTop = 0;
-    onCriteriaChange(criteria());
+    applyCriteria();
   };
 
   function mobileView(view, focus = false) {
@@ -115,8 +115,17 @@ export function createNavigation({ onSelect, onCriteriaChange }) {
     }
   }
 
-  function render({ tasks, total, offset, limit, selected, filtered, scanning, scanFailed }) {
-    const items = orderTasks(filtered || tasks);
+  function render({ tasks, total, filteredTotal = total, workspaces = [], offset, limit, selected, filtered }) {
+    const selectedWorkspace = workspacePicker.value;
+    patch(workspacePicker, ['', ...workspaces].map(cwd => [cwd, cwd, value => {
+      const option = el('option', value || '全部工作区');
+      option.value = value;
+      option.title = value;
+      return option;
+    }]));
+    workspacePicker.value = workspaces.includes(selectedWorkspace) ? selectedWorkspace : '';
+    workspacePicker.hidden = workspaces.length < 2;
+    const items = orderTasks(tasks);
     const grouped = { active:[], done:[], cancelled:[] };
     for (const task of items) {
       const group = ['done', 'cancelled'].includes(task.status) ? task.status : 'active';
@@ -136,15 +145,14 @@ export function createNavigation({ onSelect, onCriteriaChange }) {
     }
     if (oldTop) scroll.scrollTop = oldTop;
     select(selected);
-    setText($('count'), scanFailed ? '筛选暂未完成' : scanning ? '正在筛选…' : filtered ? `${items.length} / ${total} 项` : `${total} 项`);
+    setText($('count'), filtered ? `${filteredTotal} / ${total} 项` : `${total} 项`);
     const empty = $('list-empty');
     empty.hidden = !!items.length;
-    setText(empty, scanFailed ? '读取其他页失败，正在重试。' : scanning ? '正在读取其他页的任务…'
-      : total ? '没有匹配的任务。' : '还没有任务。');
-    $('pager').hidden = !!filtered || total <= limit;
+    setText(empty, total ? '没有匹配的任务。' : '还没有任务。');
+    $('pager').hidden = filteredTotal <= limit;
     $('prev').disabled = !offset;
-    $('next').disabled = offset + limit >= total;
-    setText($('page'), `${Math.floor(offset / limit) + 1} / ${Math.max(1, Math.ceil(total / limit))}`);
+    $('next').disabled = offset + limit >= filteredTotal;
+    setText($('page'), `${Math.floor(offset / limit) + 1} / ${Math.max(1, Math.ceil(filteredTotal / limit))}`);
   }
 
   return { render, select, showDetail: () => mobileView('detail') };

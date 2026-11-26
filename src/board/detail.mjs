@@ -85,7 +85,7 @@ function preserveScroll(scroll, previous, anchor) {
   } else scroll.scrollTop = previous;
 }
 
-export function createDetail({ onSelect, onOpenGraph }) {
+export function createDetail({ onSelect, onOpenGraph, onDiscussionWindow }) {
   const scroll = $('detail-scroll');
   const panel = $('detail-content');
   const tabs = $('tabs');
@@ -149,7 +149,7 @@ export function createDetail({ onSelect, onOpenGraph }) {
   };
 
   function viewEntries(task) {
-    const context = { onSelect, showTab, state };
+    const context = { onSelect, showTab, state, onDiscussionWindow };
     if (tab === 'overview') return overviewEntries(task, context);
     if (tab === 'goal' || tab === 'issue') {
       return goalEntry(task.goal, { ...context, tab, discussion:tab === 'issue' });
@@ -211,7 +211,7 @@ export function createDetail({ onSelect, onOpenGraph }) {
     const live = tab === 'discussion' ? !endStates.has(task.status) :
       (tab === 'records' || tab === 'process') && running.has(task.status);
     const nextMarker = JSON.stringify(tab === 'discussion' ? task.discussion
-      : ['records', 'process'].includes(tab) ? [task.events, task.command?.output, task.command?.code] : null);
+      : ['records', 'process'].includes(tab) ? [task.events, task.commands ?? task.command] : null);
     const changed = ready && (live || wasLive) && marker !== nextMarker;
     if (changed && tab === 'discussion' && !atTail) {
       const round = anchor?.node.closest('.round');

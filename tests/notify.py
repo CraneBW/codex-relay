@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 from pathlib import Path
 root=Path(os.environ["RELAY_FIXTURE"])
 command, target, *args = sys.argv[1:]
@@ -18,8 +18,16 @@ if command == "get-conversation-metadata":
     print(json.dumps({"response": {"conversationMetadata": {"metadata": metadata, "staticConfig": "x" * 500_000}}}))
 elif command == "send-message":
     record("delivery-attempts.jsonl", sys.argv[1:])
+    held = root / f"hold-delivery-{target}"
+    deadline = time.monotonic() + 15
+    while held.exists():
+        if time.monotonic() >= deadline:
+            sys.exit("测试投递等待超时")
+        time.sleep(.02)
     if (root / f"dead-{target}").exists():
         sys.exit("目标子代理已退出")
+    if (root / f"offline-{target}").exists():
+        sys.exit("目标对话不可达")
     if (root / "offline").exists():
         sys.exit(2)
     record("deliveries.jsonl", sys.argv[1:])

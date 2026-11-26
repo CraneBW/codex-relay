@@ -63,6 +63,7 @@ async function quit() {
   for (const socket of sockets) socket.destroy();
   await supervisor.stop();
   try { unlinkSync(socketPath); } catch {}
+  lock.close();
   process.exit(0);
 }
 process.on('SIGTERM', () => void quit());

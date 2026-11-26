@@ -1,8 +1,9 @@
-import json, sqlite3, uuid
+import json, sqlite3, subprocess, uuid
 from pathlib import Path
-from probe import ENV, MCP, NOTICES, ORIGIN, PROJECT, TEMP, messages, notice, start_worker, until
+from probe import ENV, MCP, NOTICES, ORIGIN, PROJECT, ROOT, TEMP, messages, notice, start_worker, until
 
 ENV["CODEX_RELAY_CODEX"]=str(Path(__file__).parent.resolve()/"fake_codex.py")
+ENV.update(CODEX_RELAY_MAX_CONCURRENT="4", CODEX_RELAY_TURN_IDLE_MS="1800000", CODEX_RELAY_NOTICE_MAX_ATTEMPTS="12")
 
 luna, terra, sol, astra = "gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"
 default_read = ("default", "read-only", "on-request")
@@ -256,15 +257,18 @@ def check_parallel_writes(m):
     nested.mkdir(parents=True)
     right.mkdir()
 
-    def write(key, cwd, goal='QUICK'):
-        return m.scoped('relay_dispatch', dict(requestKey=key, title=key, goal=goal, cwd=str(cwd)))['id']
+    def write(key, cwd, goal='QUICK', origin=ORIGIN, **fields):
+        return m.scoped('relay_dispatch', dict(requestKey=key, title=key, goal=goal, cwd=str(cwd), **fields), origin)['id']
 
     a = write('left-owner', left, 'HOLD')
-    b = write('right-owner', right, 'HOLD')
-    until(lambda: all(m.inspect(task)['status'] == 'running' for task in (a, b)))
-    same = write('same-directory', left)
-    child = write('nested-directory', nested)
-    parent = write('parent-directory', PROJECT)
+    foreign = str(uuid.uuid4())
+    b = write('right-owner', right, 'HOLD', origin=foreign)
+    def right_owner():
+        return m.scoped('relay_inspect', {'id': b}, foreign)
+    until(lambda: m.inspect(a)['status'] == right_owner()['status'] == 'running')
+    same = write('same-directory', left, graphId='lock-graph')
+    child = write('nested-directory', nested, graphId='lock-graph')
+    parent = write('parent-directory', PROJECT, graphId='lock-graph')
 
     def waiting(task, *owners):
         info = m.inspect(task)
@@ -276,7 +280,13 @@ def check_parallel_writes(m):
 
     for task in (same, child):
         waiting(task, m.inspect(a))
-    waiting(parent, m.inspect(a), m.inspect(b))
+    waiting(parent, m.inspect(a), right_owner())
+    panel = m.call('relay_board_changes', {'limit': 1, 'workspace': str(left)})
+    graph = next(g for g in panel['graphs'] if g['graphId'] == 'lock-graph')
+    assert graph['origin'] == ORIGIN and [node['id'] for node in graph['nodes']] == [same, child, parent]
+    assert [node['id'] for node in graph['externalNodes']] == [a, b]
+    assert all(node['holdsWriteLock'] for node in graph['externalNodes'])
+    print('PASS same- and cross-conversation visible write-lock owners appear once as external graph nodes')
     m.control(a, 'steer', 'finish')
     notice(a, timeout=12)
     assert m.inspect(a)['status'] == 'review'
@@ -287,8 +297,8 @@ def check_parallel_writes(m):
     m.control(same, 'accept')
     notice(child, timeout=12)
     m.control(child, 'accept')
-    waiting(parent, m.inspect(b))
-    m.control(b, 'cancel')
+    waiting(parent, right_owner())
+    m.scoped('relay_control', {'id': b, 'action': 'cancel'}, foreign)
     notice(parent, timeout=12)
     m.control(parent, 'accept')
     print('PASS simultaneous non-nested writes, same/nested queues, multiple blockers and lock handoff')
@@ -349,7 +359,8 @@ def check_dag(m):
     assert merge_args['goal'] in prompt
     sources = json.loads(prompt.split('已验收的上游产出。以下内容供本任务引用。\n', 1)[1])
     assert sources == [{'节点': view['nodeLabel'], '结论': view['result']['summary'],
-                        '证据': view['result']['evidence'], '反重力验收备注': view['current']} for view in (a_view, b_view)]
+                        '证据': view['result']['evidence'], '反重力验收备注': view['current'],
+                        **({'分歧与限制': ''} if view['kind'] == 'discussion' else {})} for view in (a_view, b_view)]
     m.control(merge, 'accept')
     notice(follow, timeout=12)
     assert_profile(m.inspect(follow), astra, 'max', None)
@@ -411,6 +422,122 @@ def check_unavailable_upstreams(m):
     print('PASS blocked, waiting_user, host and cancelled upstream queue reasons')
     print('PASS complete 41-node graph across default and offset task pages')
     return b
+
+
+def check_board_filters(m):
+    left = PROJECT / 'left'
+    task = m.scoped('relay_dispatch', dict(requestKey='board-filters', title='筛选验收', goal='QUICK', cwd=str(left),
+        mode='read', nodeLabel='全文命中', graphId='filter-graph', graphTitle='隔离样例Alpha', permission='auto', difficulty='browser'))['id']
+    notice(task, timeout=12)
+    selected = {'selected': task}
+    base = m.call('relay_board_changes', selected)
+    assert base['filteredTotal'] == base['total'] and base['hasGraphs']
+    assert base['workspaces'] == sorted(map(str, (PROJECT, left, left / 'nested', PROJECT / 'left-peer')))
+    for query in (task.upper(), '隔离样例ALPHA', '全文命中 filter-graph', 'AUTO', 'Terra medium',
+                  'gpt-6.1-terra read-only never review'):
+        data = m.call('relay_board_changes', {'query': query, 'includeGraphs': False, **selected})
+        assert task in {t['id'] for t in data['tasks']}, query
+        assert data['total'] == base['total'] and data['workspaces'] == base['workspaces']
+        assert data['graphs'] == [] and data['hasGraphs'] and data['selected']['id'] == task
+    attention = m.call('relay_board_changes', {'filter': 'attention', 'query': f'{task} auto', 'includeGraphs': True})
+    assert attention['filteredTotal'] == 1 and attention['tasks'][0]['id'] == task
+    assert attention['graphs'] == base['graphs']
+    for args in ({'filter': 'active'}, {'filter': 'done'}, {'query': f'{task} untrusted'}, {'workspace': str(PROJECT / 'left-peer')}):
+        data = m.call('relay_board_changes', {'query': task, **selected, **args})
+        assert not data['tasks'] and data['filteredTotal'] == 0 and data['selected']['id'] == task, args
+
+    by_workspace = m.call('relay_board_changes', {'workspace': str(left), 'includeGraphs': False})
+    assert by_workspace['filteredTotal'] == len(by_workspace['tasks'])
+    assert {t['cwd'] for t in by_workspace['tasks']} == {str(left), str(left / 'nested')}
+    pages = [m.call('relay_board_changes', {'filter': 'active', 'query': '分页节点', 'limit': 3, 'offset': offset, 'includeGraphs': False})
+             for offset in (0, 39)]
+    assert all(data['filteredTotal'] == 40 and data['total'] == base['total'] for data in pages)
+    assert [len(data['tasks']) for data in pages] == [3, 1]
+    assert all(t['status'] == 'queued' and '分页节点' in t['title'] for data in pages for t in data['tasks'])
+    m.control(task, 'accept')
+    done = m.call('relay_board_changes', {'filter': 'done', 'query': task})
+    assert done['filteredTotal'] == 1 and done['tasks'][0]['id'] == task
+    print('PASS board status filters, field search, path-boundary workspace isolation, filtered pagination and graph opt-out')
+
+
+def check_cascade_cancel(m):
+    foreign = str(uuid.uuid4())
+
+    def dispatch(key, goal='QUICK', depends=(), origin=ORIGIN):
+        return m.scoped('relay_dispatch', dict(requestKey=key, title=key, mode='read', goal=goal,
+            graphId='cascade-graph', dependsOn=list(depends)), origin)['id']
+
+    done = dispatch('cascade-done')
+    notice(done, timeout=12)
+    m.control(done, 'accept')
+    root = dispatch('cascade-root', 'HOLD')
+    mid = dispatch('cascade-mid', depends=[root])
+    direct = dispatch('cascade-direct', depends=[root, done])
+    indirect = dispatch('cascade-indirect', depends=[mid])
+    diamond = dispatch('cascade-diamond', depends=[mid, direct])
+    other_root = dispatch('cascade-root', 'HOLD', origin=foreign)
+    other_child = dispatch('cascade-direct', depends=[other_root], origin=foreign)
+    accepted = m.inspect(done)
+    until(lambda: m.inspect(root)['status'] == 'running')
+    m.control(mid, 'cancel')
+    assert m.inspect(indirect)['waitInfo']['kind'] == 'upstream_cancelled'
+    assert m.inspect(direct)['status'] == 'queued'
+    assert m.control(root, 'cancel', cascade=True)['status'] == 'cancelled'
+    m.control(root, 'cancel', cascade=True)
+    for child in (direct, indirect, diamond):
+        view = m.inspect(child)
+        assert view['status'] == 'cancelled' and view['threadId'] is None and not view['holdsWriteLock']
+        assert sum(event['kind'] == 'cancelled' and root in event['text'] for event in view['events']) == 1
+    assert {**m.inspect(done), 'downstreams': accepted['downstreams']} == accepted
+    assert m.scoped('relay_inspect', {'id': other_child}, foreign)['status'] == 'queued'
+    m.scoped('relay_control', {'id': other_root, 'action': 'cancel', 'cascade': True}, foreign)
+
+    complete_child = dispatch('cascade-done-child', depends=[done])
+    notice(complete_child, timeout=12)
+    m.control(complete_child, 'accept')
+    queued = m.scoped('relay_discuss', dict(requestKey='cascade-unclaimed', title='等待认领', question='QUICK',
+        position='测试已完成节点的排队下游', delegate='subagent', dependsOn=[complete_child]))['id']
+    completed = m.inspect(complete_child)
+    assert m.inspect(queued)['status'] == 'queued'
+    assert m.control(done, 'cancel', cascade=True)['status'] == 'done'
+    assert m.inspect(queued)['status'] == 'cancelled' and not m.inspect(queued)['awaitingDelegate']
+    assert {**m.inspect(complete_child), 'downstreams': completed['downstreams']} == completed
+    print('PASS cancel cascade traverses cancelled intermediates, deduplicates shared descendants and preserves other conversations and completed tasks')
+
+
+def check_command_history(m):
+    task = m.dispatch('command-history', 'QUICK MULTI_COMMAND', 'read')['id']
+    notice(task, timeout=12)
+    view = m.inspect(task)
+    commands = view['commands']
+    assert len(commands) == len({command['id'] for command in commands}) == 5
+    assert [(c['text'], c['status'], c['code'], c['output']) for c in commands] == [
+        (f'fixture-step-{step}', 'failed' if step == 1 else 'completed', 7 if step == 1 else 0, f'output-{step}\n')
+        for step in range(1, 6)]
+    assert view['command'] == commands[-1]
+    board = m.call('relay_board_changes', {'selected': task, 'includeGraphs': False})
+    assert board['selected']['commands'] == commands and board['selected']['command'] == commands[-1]
+    m.control(task, 'accept')
+    print('PASS last five commands retain failed output after later commands and out-of-order completions')
+    return task, commands
+
+
+def check_context_budget():
+    subprocess.run(['node', '--input-type=module', '-e', r'''
+        import assert from 'node:assert/strict';
+        import { Supervisor } from './src/supervisor.mjs';
+        const text = '长内容\n"\\'.repeat(800);
+        const tasks = new Map(Array.from({ length: 24 }, (_, id) => [id, {
+          title: `上游 ${id}`, kind: 'discussion', current: text, handoff: { note: text },
+          result: { summary: text, evidence: text, disagreement: text },
+        }]));
+        const context = new Supervisor({ tasks }).dependencyContext({ dependsOn: [...tasks.keys()] });
+        assert.ok(context.length <= 12000, context.length);
+        const sources = JSON.parse(context.slice(context.indexOf('[')));
+        assert.deepEqual(sources.map(source => source.节点), [...tasks.values()].map(task => task.title));
+        assert.ok(sources.every(source => source.结论 && source.证据 && source.反重力验收备注 && source.分歧与限制 && source.子代理交接纪要));
+    '''], check=True, cwd=ROOT, env=ENV)
+    print('PASS serialized DAG context stays within 12000 characters with all 24 upstreams')
 
 
 def check_delegation(m):
@@ -487,7 +614,7 @@ def check_delegation(m):
         rejected(lambda: control_as(task, action, note='越权介入'), '仅限主对话')
 
     begin = len(messages())
-    control_as(task, 'resume', note='QUICK 子代理追问反例', expectedNotice=first['noticeId'])
+    control_as(task, 'resume', note='QUICK WIDE_CONTEXT 子代理追问反例', expectedNotice=first['noticeId'])
     response(task, subagent_a, begin)
     second = inspect_as(task, subagent_a)
     assert second['threadId'] == first['threadId'] and second['delegateOrigin'] == subagent_a
@@ -502,14 +629,21 @@ def check_delegation(m):
     rejected(lambda: control_as(task, 'claim'), '当前未等待')
     rejected(lambda: control_as(task, 'cancel'), 'handover')
     rejected(lambda: control_as(child, 'claim', ORIGIN), '只有讨论任务')
-    close = m.control(task, 'accept', '主对话重新核对原始证据后的定论', expectedNotice=second['noticeId'])
+    approval = '主对话重新核对原始证据后的定论' + '验' * 630 + '验收尾'
+    close = m.control(task, 'accept', approval, expectedNotice=second['noticeId'])
     assert close['status'] == 'done' and close['handoff'] == handover['handoff']
     assert close['discussion'][:-1] == second['discussion'] and close['discussion'][-1]['actor'] == 'main'
-    assert close['discussion'][-1]['body'] == close['current']
+    assert close['discussion'][-1]['body'] == approval
     response(child)
     downstream = m.inspect(child)
     turns = json.loads((TEMP / (downstream['threadId'] + '.history')).read_text())
-    assert close['current'] in turns[0]['items'][0]['content'][0]['text']
+    prompt = turns[0]['items'][0]['content'][0]['text']
+    sources = json.loads(prompt.split('已验收的上游产出。以下内容供本任务引用。\n', 1)[1])
+    assert sources == [{'节点': close['title'], '结论': second['result']['summary'][:1200],
+                       '证据': second['result']['evidence'][:1600], '反重力验收备注': approval,
+                       '分歧与限制': '替代解释仍需源数据', '子代理交接纪要': handover['handoff']['note']}]
+    assert len(sources[0]['结论']) == 1200 and len(sources[0]['证据']) == 1600
+    print('PASS downstream prompt includes expanded discussion summary, evidence, full acceptance note, disagreement and handoff')
     m.control(child, 'accept')
 
     for target in (ORIGIN, grandchild, foreign):
@@ -583,8 +717,169 @@ def check_delegation(m):
     print('PASS delegated DAG, scoped ownership, cached lineage, round actors, handover, main acceptance and dead-agent retry')
 
 
+def check_sqlite_persist():
+    directory = TEMP / 'persist-failures'
+    directory.mkdir()
+    subprocess.run(['node', '--input-type=module', '-e', '''
+      import assert from 'node:assert/strict';
+      import { Store } from './src/store.mjs';
+      const store = new Store(process.argv[1]);
+      const db = store.db;
+      assert.equal(db.prepare('PRAGMA busy_timeout').get().timeout, 5000);
+      const task = { id:'test', origin:'main', requestKey:'test', status:'review' };
+      db.exec('BEGIN IMMEDIATE');
+      assert.throws(() => store.persist(task, true), /within a transaction/);
+      assert(!Object.hasOwn(task, 'updated') && !Object.hasOwn(task, 'noticeId') && !Object.hasOwn(task, 'delivery'));
+      db.exec('ROLLBACK');
+      store.persist(task, true);
+      const before = { ...task }, revision = store.revision;
+      const message = { key:'reply', speaker:'Astra Max', text:'test reply' };
+      function unchanged() {
+        assert.deepEqual(task, before);
+        assert.deepEqual(JSON.parse(db.prepare('SELECT body FROM tasks').get().body), before);
+        assert.deepEqual(db.prepare('SELECT id FROM notices').all().map(n => n.id), [before.noticeId]);
+        assert.equal(db.prepare('SELECT count(*) AS n FROM discussion_messages').get().n, 0);
+        assert.equal(store.revision, revision);
+      }
+      db.exec(`CREATE TRIGGER failed_write BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'write failed'); END`);
+      assert.throws(() => store.persist(task, true, message), /write failed/);
+      unchanged();
+      db.exec(`DROP TRIGGER failed_write;
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE parent(id INTEGER PRIMARY KEY);
+        CREATE TABLE child(parent_id REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
+        CREATE TRIGGER failed_commit AFTER UPDATE ON tasks BEGIN INSERT INTO child VALUES(1); END`);
+      assert.throws(() => store.persist(task, true, message), /FOREIGN KEY constraint failed/);
+      unchanged();
+      db.exec('DROP TRIGGER failed_commit');
+      store.persist(task, true, message);
+      assert.notEqual(task.noticeId, before.noticeId);
+      assert.equal(db.prepare('SELECT count(*) AS n FROM discussion_messages').get().n, 1);
+    ''', str(directory)], check=True, cwd=ROOT, env=ENV)
+    print('PASS SQLite busy timeout and rollback on BEGIN, write and COMMIT failures')
+
+
+def check_discussion_history(m):
+    tools = {tool['name']: tool['inputSchema'] for tool in m.req('tools/list', {})['tools']}
+    for name in ('relay_inspect', 'relay_board_changes'):
+        schema = tools[name]
+        assert schema['properties']['discussionLimit']['maximum'] == 100
+        assert all(key not in schema.get('required', []) for key in ('discussionLimit', 'discussionOffset'))
+    task = m.scoped('relay_discuss', dict(requestKey='full-history', title='多轮讨论', question='QUICK 首轮问题', position='初步判断'))['id']
+    notice(task, timeout=8)
+    for round_number in range(2, 6):
+        start = len(messages())
+        m.control(task, 'resume', f'QUICK 第 {round_number} 轮追问')
+        notice(task, start, timeout=8)
+        if round_number == 4:
+            exact = m.inspect(task)
+            assert len(exact['discussion']) == exact['discussionTotal'] == 8
+            assert exact['discussionTruncated'] is False
+    recent = m.inspect(task)
+    assert recent['discussionTotal'] == 10 and recent['discussionTruncated'] is True
+    assert len(recent['discussion']) == 8 and recent['discussion'][-2]['body'] == 'QUICK 第 5 轮追问'
+    complete = m.scoped('relay_inspect', {'id':task, 'discussionLimit':10})
+    assert complete['discussion'][:8] == exact['discussion'] and complete['discussion'][2:] == recent['discussion']
+    assert complete['discussionTotal'] == 10 and complete['discussionTruncated'] is False
+    early = m.scoped('relay_inspect', {'id':task, 'discussionLimit':2, 'discussionOffset':8})
+    assert early['discussion'] == complete['discussion'][:2] and early['discussionTruncated'] is False
+    detail = m.call('relay_board_changes', {'selected':task, 'discussionLimit':10})['selected']
+    assert detail['discussion'] == complete['discussion'] and detail['discussionTruncated'] is False
+    page = m.call('relay_board_changes', {'selected':task, 'discussionLimit':4, 'discussionOffset':4})['selected']
+    assert page['discussion'] == complete['discussion'][2:6] and page['discussionTruncated'] is True
+    m.control(task, 'accept', '核对五轮讨论后定论')
+    print('PASS exact eight messages, recent ten-message window, earlier pages and board expansion')
+
+
+def check_outbox(m):
+    unavailable = str(uuid.uuid4())
+    held = TEMP / f'hold-delivery-{unavailable}'
+    offline = TEMP / f'offline-{unavailable}'
+    held.touch(); offline.touch()
+
+    def dispatch(key, origin):
+        return m.scoped('relay_dispatch', dict(requestKey=key, title=key, goal='QUICK', mode='read'), origin)['id']
+
+    def inspect(task):
+        return m.scoped('relay_inspect', {'id':task}, unavailable)
+
+    def attempts(task):
+        path = TEMP / 'delivery-attempts.jsonl'
+        return [packet for line in path.read_text().splitlines() if task in (packet := json.loads(line))[2]]
+
+    try:
+        blocked = dispatch('outbox-held', unavailable)
+        until(lambda: attempts(blocked))
+        same_target = dispatch('outbox-same-target', unavailable)
+        until(lambda: inspect(same_target)['delivery'] == 'pending')
+        healthy = dispatch('outbox-healthy', ORIGIN)
+        notice(healthy, timeout=8)
+        until(lambda: m.inspect(healthy)['delivery'] == 'sent')
+        assert len(attempts(blocked)) == 1 and not attempts(same_target)
+        assert inspect(blocked)['delivery'] == 'pending' and inspect(same_target)['delivery'] == 'pending'
+        held.unlink()
+        for task in (blocked, same_target):
+            until(lambda: inspect(task)['delivery'] == 'failed')
+            view = inspect(task)
+            assert view['status'] == 'review' and '目标对话不可达' in view['deliveryError']
+            assert any(e['kind'] == 'delivery' and '已尝试 2 次' in e['text'] for e in view['events'])
+            assert len(attempts(task)) == 2
+            with sqlite3.connect(TEMP / 'state' / 'tasks.sqlite') as db:
+                assert db.execute('SELECT delivered,attempts FROM notices WHERE id=?', (view['noticeId'],)).fetchone() == (2, 2)
+            m.scoped('relay_control', {'id':task, 'action':'accept'}, unavailable)
+            with sqlite3.connect(TEMP / 'state' / 'tasks.sqlite') as db:
+                assert db.execute('SELECT id FROM notices WHERE id=?', (view['noticeId'],)).fetchone() is None
+        m.control(healthy, 'accept')
+    finally:
+        held.unlink(missing_ok=True); offline.unlink()
+    print('PASS stalled outbox target isolated, same-target serialization, dead letters and cleanup')
+
+
+def check_concurrency(m):
+    alternate = str(uuid.uuid4())
+    first = m.dispatch('slot-first', 'HOLD', 'read')['id']
+    second = m.scoped('relay_dispatch', dict(requestKey='slot-second', title='slot-second', goal='HOLD', mode='read'), alternate)['id']
+    third = m.dispatch('slot-third', 'QUICK', 'read')['id']
+    queued = m.inspect(third)
+    assert queued['status'] == 'queued' and queued['threadId'] is None
+    assert queued['waitInfo']['kind'] == 'concurrency'
+    assert {ref['id'] for ref in queued['waitInfo']['blockers']} == {first, second}
+    assert m.call('relay_board_changes', {'selected':third})['selected']['waitInfo']['kind'] == 'concurrency'
+    until(lambda: m.inspect(first)['status'] == 'running')
+    m.control(first, 'steer', 'finish')
+    notice(third, timeout=8)
+    assert m.inspect(first)['status'] == 'review' and m.inspect(third)['status'] == 'review'
+    m.control(first, 'accept'); m.control(third, 'accept')
+    m.scoped('relay_control', {'id':second, 'action':'cancel'}, alternate)
+    print('PASS limit two across conversations, queue blocker references and automatic slot reuse')
+
+
+def check_stall(m):
+    stalled = m.dispatch('stall', 'HOLD HEARTBEAT')['id']
+    def running():
+        view = m.inspect(stalled)
+        return view if view['status'] == 'running' else None
+    opened = until(running)
+    queued = m.dispatch('stall-follower', 'QUICK')
+    assert queued['status'] == 'queued' and queued['waitInfo']['kind'] == 'write_lock'
+    until(lambda: (TEMP / (opened['threadId'] + '.heartbeat')).exists())
+    assert m.inspect(stalled)['status'] == 'running'
+    delivery = notice(stalled, timeout=8)
+    view = m.inspect(stalled)
+    assert view['status'] == 'blocked' and not view['holdsWriteLock'] and view['noticeId'] in delivery[2]
+    assert '无活动超时' in view['result']['summary'] and '1500' in view['result']['evidence'] and 'resume' in view['result']['next']
+    history = json.loads((TEMP / (view['threadId'] + '.history')).read_text())
+    assert history[-1]['status'] == 'interrupted'
+    notice(queued['id'], timeout=8)
+    assert m.inspect(queued['id'])['status'] == 'review'
+    m.control(queued['id'], 'accept')
+    print('PASS active deltas refresh idle timer, stalled turn interrupts, blocked wakeup and reuse of workspace and slot')
+
+
 def check():
     print("Regression workspace",TEMP,flush=True)
+    check_sqlite_persist()
+    check_context_budget()
     worker=start_worker();m=MCP()
     try:
         try: m.call("relay_dispatch",{"requestKey":"bad","title":"bad","goal":"bad","effort":"low"})
@@ -602,7 +897,8 @@ def check():
         assert len(messages())==base
         print("PASS no wake for progress or an ordinary failing command; dispatch retry idempotent")
         other=m.dispatch("two","QUICK")["id"]
-        assert m.inspect(other)["status"]=="queued"
+        queued=m.inspect(other)
+        assert queued["status"]=="queued" and queued["startedAt"] is None and queued["turns"]==0
         reader=m.dispatch("reader","QUICK","read")["id"];notice(reader)
         m.control(reader,"accept")
         try: m.scoped("relay_inspect",{"id":held},str(uuid.uuid4()))
@@ -610,9 +906,16 @@ def check():
         else: raise AssertionError("cross-conversation ownership")
         before=m.inspect(held)
         assert m.control(held,"takeover","手动排障")["status"]=="host"
+        stopped=m.inspect(held)
+        assert before["turns"]==stopped["turns"]==1 and before["finishedAt"] is None
+        assert stopped["startedAt"] <= stopped["finishedAt"] and stopped["durationMs"] >= 0
         assert m.inspect(other)["status"]=="queued"
         m.control(held,"resume","已核对测试入口");notice(held)
         after=m.inspect(held);assert after["threadId"]==before["threadId"] and after["status"]=="review"
+        assert after["turns"]==2 and after["startedAt"]==stopped["startedAt"]
+        assert after["finishedAt"] >= stopped["finishedAt"] and after["durationMs"] >= stopped["durationMs"]
+        detail=m.call("relay_board_changes", {"selected": held})["selected"]
+        assert all(detail[field]==after[field] for field in ("turns", "startedAt", "finishedAt", "durationMs"))
         m.control(held,"accept");notice(other);m.control(other,"accept")
         print("PASS write queue, concurrent reader, authenticated conversation, exclusive handoff")
         native=m.dispatch("native","NATIVE")["id"];notice(native)
@@ -665,7 +968,9 @@ def check():
         turns[-1]["items"].append({"type":"agentMessage","text":json.dumps(
             {"outcome":"done","summary":"completed before crash","evidence":"original","next":""})})
         h.write_text(json.dumps(turns));worker=start_worker();notice(won)
-        assert m.inspect(won)["result"]["summary"]=="completed before crash" and len(json.loads(h.read_text()))==len(turns)
+        recovered=m.inspect(won)
+        assert recovered["result"]["summary"]=="completed before crash" and len(json.loads(h.read_text()))==len(turns)
+        assert recovered["turns"]==original["turns"]==1 and recovered["startedAt"]==original["startedAt"]
         m.control(won,"accept");print("PASS recovered already-completed turn without replaying its commands")
         (TEMP/"offline").touch(); retry=m.dispatch("surviving-outbox","BLOCK wait")["id"]
         until(lambda:m.inspect(retry)["delivery"]=="retry");event=m.inspect(retry)["noticeId"]
@@ -682,10 +987,13 @@ def check():
         check_parallel_writes(m)
         merge = check_dag(m)
         waiting = check_unavailable_upstreams(m)
+        check_board_filters(m)
+        check_cascade_cancel(m)
+        history_task, commands = check_command_history(m)
         worker.terminate(); worker.wait(timeout=10)
         with sqlite3.connect(TEMP / 'state' / 'tasks.sqlite') as db:
             legacy = json.loads(db.execute('SELECT body FROM tasks WHERE id=?', (held,)).fetchone()[0])
-            for field in ('graphId', 'graphTitle', 'nodeLabel', 'dependsOn'):
+            for field in ('graphId', 'graphTitle', 'nodeLabel', 'dependsOn', 'commands', 'turns', 'startedAt', 'finishedAt', 'durationMs'):
                 legacy.pop(field)
             db.execute('UPDATE tasks SET body=? WHERE id=?', (json.dumps(legacy), held))
             db.execute('ALTER TABLE discussion_messages DROP COLUMN actor')
@@ -697,9 +1005,24 @@ def check():
         assert child['threadId'] is None and child['waitInfo']['kind'] == 'upstream_cancelled'
         original = m.dispatch('one','HOLD')
         assert original['id'] == held and original['graphId'] is None and original['dependsOn'] == []
+        legacy = m.inspect(held)
+        assert legacy['commands'] == [legacy['command']]
+        assert all(legacy[field] is None for field in ('turns', 'startedAt', 'finishedAt', 'durationMs'))
+        restored_history = m.inspect(history_task)
+        assert restored_history['commands'] == commands and restored_history['command'] == commands[-1]
         assert [msg['actor'] for msg in m.inspect(legacy_discussion)['discussion']] == ['main', 'astra', 'main', 'astra', 'main']
         print('PASS graph, blocked dependency, legacy task records and SQLite actor migration on restart')
         check_delegation(m)
+        check_discussion_history(m)
+        worker.terminate(); worker.wait(timeout=10)
+        ENV.update(CODEX_RELAY_MAX_CONCURRENT='2', CODEX_RELAY_NOTICE_MAX_ATTEMPTS='2')
+        worker = start_worker()
+        check_concurrency(m)
+        check_outbox(m)
+        worker.terminate(); worker.wait(timeout=10)
+        ENV.update(CODEX_RELAY_MAX_CONCURRENT='1', CODEX_RELAY_TURN_IDLE_MS='1500')
+        worker = start_worker()
+        check_stall(m)
     finally:
         m.close();worker.terminate();worker.wait(timeout=12)
 

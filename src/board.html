@@ -25,8 +25,9 @@
           <div class="section-line"><h2>任务列表</h2><span class="count" id="count"></span></div>
           <label class="search-field">
             <span class="search-icon" aria-hidden="true"></span>
-            <input type="search" id="search" aria-label="按标题、节点、模型或目录筛选" placeholder="搜索任务、模型、目录" autocomplete="off">
+            <input type="search" id="search" aria-label="搜索任务、任务群、模型、权限或目录" placeholder="搜索任务、模型、目录" maxlength="4096" autocomplete="off">
           </label>
+          <select id="workspace-filter" aria-label="按工作区筛选" hidden></select>
           <div id="filters" class="filters" role="group" aria-label="筛选状态">
             <button type="button" data-filter="all" aria-pressed="true">全部</button>
             <button type="button" data-filter="active" aria-pressed="false">进行中</button>
@@ -66,7 +67,8 @@
           <div id="graph-scroll" class="graph-scroll" tabindex="0" aria-label="任务依赖图画布">
             <div id="graph-canvas" class="graph-canvas"></div>
           </div>
-          <div id="graph-legend" class="graph-legend"><span>前置依赖</span><span class="lock-legend">写锁等待</span></div>
+          <div id="graph-legend" class="graph-legend"><span>前置依赖</span><span class="lock-legend" hidden>写锁等待</span></div>
+          <p id="graph-loading" class="empty-note" role="status" hidden>正在读取任务依赖图…</p>
         </section>
         <header id="task-head" class="task-head" hidden>
           <div class="heading-line">
