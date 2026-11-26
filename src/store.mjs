@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { modelName, sessionPermission } from './models.mjs';
-import { inside } from './paths.mjs';
+import { inside, realWorkspacePath } from './paths.mjs';
 
 export const terminal = new Set(['done', 'cancelled']);
 export const active = new Set(['starting', 'running', 'stopping']);
@@ -64,6 +64,9 @@ export class Store {
     )`);
     this.tasks = new Map(this.db.prepare('SELECT body FROM tasks ORDER BY rowid').all().map(row => {
       const task = JSON.parse(row.body);
+      if (process.platform === 'darwin') {
+        try { task.cwd = realWorkspacePath(task.cwd); } catch { /* The workspace may have been removed. */ }
+      }
       task.commands ??= task.command ? [task.command] : [];
       if (task.commands.length) task.command = task.commands.at(-1);
       return [task.id, task];
@@ -238,6 +241,9 @@ export class Store {
 
   board({ selected, limit = 40, offset = 0, discussionLimit, discussionOffset,
     filter = 'all', query = '', workspace, includeGraphs = true } = {}) {
+    if (workspace && process.platform === 'darwin') {
+      try { workspace = realWorkspacePath(workspace); } catch { /* A removed workspace can still be filtered by path. */ }
+    }
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const workspaces = new Set();
     const matches = [];

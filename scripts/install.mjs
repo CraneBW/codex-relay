@@ -9,6 +9,8 @@ import { distStatus } from './dist-status.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const entries = ['plugin.json','mcp_config.json','hooks.json','rules','skills','sidecars','dist','src','scripts','package.json','package-lock.json','README.md'];
+const launcher = 'scripts/run-node.sh';
+const realpath = process.platform === 'darwin' ? realpathSync.native : realpathSync;
 const { values: args } = parseArgs({ options: {
   'config-dir': { type: 'string' }, 'allow-stale-dist': { type: 'boolean' },
 } });
@@ -53,7 +55,8 @@ function installedHash(name) {
   return fingerprint(path);
 }
 const localChange = path => Error('检测到本地修改，请先保存 ' + path);
-for (const name of entries) if (!existsSync(join(root,name))) throw Error('安装包缺少 ' + name);
+for (const name of [...entries, launcher]) if (!existsSync(join(root,name))) throw Error('安装包缺少 ' + name);
+if (existsSync(join(root, 'docs', 'demo'))) entries.push('docs/demo');
 const hashes = Object.fromEntries(entries.flatMap(e => files(join(root,e))).map(f => [f,fingerprint(join(root,f))]));
 mkdirSync(plugins,{recursive:true});
 const receiptName = '.codex-relay-installed.json';
@@ -64,7 +67,7 @@ function writeReceipt(path) {
   finally { if (existsSync(tmp)) rmSync(tmp); }
 }
 if (statIfPresent(destination)) {
-  if (realpathSync(destination) !== realpathSync(root)) {
+  if (realpath(destination) !== realpath(root)) {
     if (!lstatSync(destination).isDirectory()) throw localChange(destination);
     const receiptInfo = statIfPresent(receipt);
     if (receiptInfo && !receiptInfo.isFile()) throw localChange(receipt);
@@ -81,9 +84,14 @@ if (statIfPresent(destination)) {
     for (const [name, hash] of Object.entries(hashes)) {
       const current = installedHash(name);
       if (current === hash) {
-        // Rebuilds can leave the bundle bytes unchanged even when worker sources changed.
-        if (name !== 'dist/server.cjs' && name !== 'dist/board.html' ||
-            lstatSync(join(destination,name)).mtimeMs >= Math.floor(lstatSync(join(root,name)).mtimeMs)) continue;
+        if (name === launcher) {
+          const targetMode = lstatSync(join(destination, name)).mode;
+          const sourceMode = lstatSync(join(root, name)).mode;
+          if ((targetMode & 0o111) === (sourceMode & 0o111)) continue;
+        } else if (name === 'dist/server.cjs' || name === 'dist/board.html') {
+          // Rebuilds can leave the bundle bytes unchanged even when worker sources changed.
+          if (lstatSync(join(destination, name)).mtimeMs >= Math.floor(lstatSync(join(root, name)).mtimeMs)) continue;
+        } else continue;
       }
       else if (current !== null && current !== previous[name]) throw localChange(join(destination,name));
       changes.push([name, current]);

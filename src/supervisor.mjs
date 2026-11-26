@@ -1,10 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { Codex, discussionInstructions, discussionSchema, instructions, outcome, resultSchema } from './codex.mjs';
 import { astra, codingProfile, sessionPermission, sol, terra } from './models.mjs';
 import { active, clip, now, tail, taskLabel, terminal } from './store.mjs';
-import { inside } from './paths.mjs';
+import { inside, realWorkspacePath } from './paths.mjs';
 import { checkContext } from './context.mjs';
 import { requireDirectChild } from './lineage.mjs';
 
@@ -14,15 +15,25 @@ const maxDependencyContext = 12000;
 const maxRecentCommands = 5;
 const stoppedResult = (summary, evidence = '', next = '') => ({ outcome: 'blocked', summary: clip(summary), evidence: clip(evidence), next: clip(next) });
 function birth(pid) {
-  try { return readFileSync('/proc/' + pid + '/stat', 'utf8').split(') ').at(-1).split(' ')[19]; }
+  if (!Number.isSafeInteger(pid) || pid <= 1) return null;
+  try {
+    if (process.platform === 'darwin') {
+      const entry = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'pgid=', '-o', 'lstart='], {
+        encoding: 'utf8', env: { LC_ALL: 'C', TZ: 'UTC0' }, timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const match = /^(\d+)\s+(.+)$/.exec(entry.trim());
+      return match && Number(match[1]) === pid ? 'darwin:' + match[2] : null;
+    }
+    return readFileSync('/proc/' + pid + '/stat', 'utf8').split(') ').at(-1).split(' ')[19];
+  }
   catch { return null; }
 }
 function checkedCwd(value, roots) {
   if (!Array.isArray(roots) || !roots.length) throw Error('请在反重力项目中派单。当前对话没有挂载工作目录。');
   const path = value || (roots.length === 1 ? roots[0] : '');
   if (!isAbsolute(path)) throw Error('请指定当前项目中的绝对工作目录。');
-  const cwd = realpathSync(path);
-  if (!statSync(cwd).isDirectory() || !roots.some(r => { try { return inside(realpathSync(r), cwd); } catch { return false; } }))
+  const cwd = realWorkspacePath(path);
+  if (!statSync(cwd).isDirectory() || !roots.some(r => { try { return inside(realWorkspacePath(r), cwd); } catch { return false; } }))
     throw Error('派单目录必须位于当前反重力对话挂载的工作区。');
   return cwd;
 }
@@ -52,7 +63,7 @@ export class Supervisor {
   async recover() {
     for (const t of this.store.tasks.values()) {
       if (!active.has(t.status)) continue;
-      // Only clean up a process group whose leader still has its recorded Linux start time.
+      // A PID may have been reused while the worker was down.
       if (t.pid && t.birth && birth(t.pid) === t.birth) {
         try { process.kill(-t.pid, 'SIGTERM'); } catch {}
         await delay(200);

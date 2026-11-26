@@ -2,9 +2,22 @@
 
 日常工作只和反重力交互。直接在 Antigravity 对话里描述目标、补充信息、询问进度或叫停任务。反重力自行选择执行模型、邀请 Astra 讨论、处理阻塞，并在原对话给出验收结果。Codex 在当前工作目录执行。Codex 交付或遇阻时，插件向原对话发送事件。平时可以继续聊天、切换项目或关闭任务面板。
 
+## Mac 实拍演示
+
+在 Antigravity 对话里把「购物车总价漏算商品数量」交给 Codex。它只改了 `pricing.py` 的一行，让总价按单价乘以数量累加。修复前有 1 项测试失败，修改后 3 项全部通过。侧栏可以查看实际命令、输出和退出码，执行结束后结果回到原对话验收。
+
+<p>
+  <img src="docs/demo/01-cover.png" width="400" alt="Codex 调度台实拍封面，购物车修复通过三项测试">
+  <img src="docs/demo/02-dispatch.png" width="400" alt="Antigravity 在原对话中收到修复请求并派单给 Codex">
+</p>
+<p>
+  <img src="docs/demo/03-tests.png" width="400" alt="调度台侧栏显示三项测试通过以及命令退出码 0">
+  <img src="docs/demo/04-completion.png" width="400" alt="原对话展示代码改动与测试核对，附安装命令">
+</p>
+
 ## 安装
 
-适用 Linux、Antigravity 桌面应用、本机已配置的 Codex CLI 和 Node.js 22.13 或更高版本。发布包包含编译好的 MCP 服务与面板。解压后进入 `codex-relay` 目录，运行
+适用 Linux 和 macOS。需要 Antigravity 桌面应用、已登录的 Codex CLI，以及 Node.js 22.13 或更高版本。在 macOS 上，插件也会从 `/opt/homebrew/bin` 和 `/usr/local/bin` 查找 Node.js 和 Codex CLI。发布包包含编译好的 MCP 服务与面板。解压后进入 `codex-relay` 目录，运行
 
 ```sh
 node scripts/install.mjs

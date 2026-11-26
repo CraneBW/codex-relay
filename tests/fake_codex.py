@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, sys, threading, time, uuid
+import json, os, signal, sys, threading, time, uuid
 from pathlib import Path
 
 root=Path(os.environ["RELAY_FIXTURE"])
@@ -55,6 +55,9 @@ for raw in sys.stdin:
             assert (thread_permissions["sandbox"], thread_permissions["approvalPolicy"], selected_effort) == ("read-only", "on-request", "max")
             assert permissions(p) == {"approvalPolicy": "on-request"}
         text=p["input"][0]["text"]; turn={"id":str(uuid.uuid4()),"status":"inProgress","items":[{"type":"userMessage","content":p["input"]}]}
+        survives_worker = "HOLD crash" in text and "上次应用退出" not in text
+        if survives_worker:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
         turn["rpcProfiles"]={thread_method:[selected_model,selected_effort],m:[p["model"],p["effort"]]}
         turn["rpcPermissions"]={thread_method:thread_permissions,m:permissions(p)}
         records.append(turn); save_thread(thread,records); reply(x,{"turn":turn}); event("turn/started",dict(threadId=thread,turn=turn))
@@ -74,7 +77,8 @@ for raw in sys.stdin:
                 event("item/commandExecution/outputDelta", dict(threadId=thread, turnId=turn["id"], itemId=item["id"], delta=f"output-{step}\n"))
                 item.update(status="failed" if step == 1 else "completed", exitCode=7 if step == 1 else 0)
                 event("item/completed", dict(threadId=thread, turnId=turn["id"], item=item))
-        if "原目标" in text or "上次应用退出" in text or "QUICK" in text: finish("done")
+        if survives_worker: time.sleep(60)
+        elif "原目标" in text or "上次应用退出" in text or "QUICK" in text: finish("done")
         elif "NATIVE" in text:
             send({"id":890,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"turnId":turn["id"],"command":"example","reason":"needs host"}})
         elif "BLOCK" in text: finish("blocked")

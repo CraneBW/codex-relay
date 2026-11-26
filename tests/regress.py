@@ -1,4 +1,4 @@
-import json, sqlite3, subprocess, uuid
+import json, sqlite3, subprocess, sys, uuid
 from pathlib import Path
 from probe import ENV, MCP, NOTICES, ORIGIN, PROJECT, ROOT, TEMP, messages, notice, start_worker, until
 
@@ -11,6 +11,12 @@ default_write = ("default", "workspace-write", "on-request")
 auto_write = ("auto", "workspace-write", "never")
 full_access = ("full", "danger-full-access", "never")
 access_fields = ("permission", "sandbox", "approvalPolicy")
+
+
+def process_exited(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+    state = result.stdout.strip()
+    return not state or state.startswith("Z")
 
 
 def assert_profile(view, model, effort, difficulty):
@@ -449,6 +455,11 @@ def check_board_filters(m):
     by_workspace = m.call('relay_board_changes', {'workspace': str(left), 'includeGraphs': False})
     assert by_workspace['filteredTotal'] == len(by_workspace['tasks'])
     assert {t['cwd'] for t in by_workspace['tasks']} == {str(left), str(left / 'nested')}
+    alias = left.with_name(left.name.upper())
+    if sys.platform == 'darwin' and alias.is_dir():
+        aliased = m.call('relay_board_changes', {'workspace': str(alias), 'includeGraphs': False})
+        assert aliased['filteredTotal'] == by_workspace['filteredTotal']
+        assert {t['id'] for t in aliased['tasks']} == {t['id'] for t in by_workspace['tasks']}
     pages = [m.call('relay_board_changes', {'filter': 'active', 'query': '分页节点', 'limit': 3, 'offset': offset, 'includeGraphs': False})
              for offset in (0, 39)]
     assert all(data['filteredTotal'] == 40 and data['total'] == base['total'] for data in pages)
@@ -896,7 +907,12 @@ def check():
         until(lambda: m.inspect(held)["command"])
         assert len(messages())==base
         print("PASS no wake for progress or an ordinary failing command; dispatch retry idempotent")
-        other=m.dispatch("two","QUICK")["id"]
+        alias = PROJECT.with_name(PROJECT.name.upper())
+        args = {"requestKey":"two", "title":"two", "goal":"QUICK", "difficulty":"simple", "mode":"write"}
+        if alias.is_dir():
+            args["cwd"] = str(alias)
+        other=m.scoped("relay_dispatch", args)["id"]
+        assert other==m.dispatch("two","QUICK")["id"]
         queued=m.inspect(other)
         assert queued["status"]=="queued" and queued["startedAt"] is None and queued["turns"]==0
         reader=m.dispatch("reader","QUICK","read")["id"];notice(reader)
@@ -942,10 +958,14 @@ def check():
                         model=model, effort=effort, permission=access[0])
             t=m.scoped("relay_dispatch",args)["id"];until(lambda: m.inspect(t)["command"])
             thread=m.inspect(t)["threadId"];n=len(messages())
-            if how == "crash": worker.kill()
-            else: worker.terminate()
-            worker.wait(timeout=10)
-            if how != "crash":
+            if how == "crash":
+                with sqlite3.connect(TEMP / "state" / "tasks.sqlite") as db:
+                    live = json.loads(db.execute("SELECT body FROM tasks WHERE id=?", (t,)).fetchone()[0])
+                assert live["birth"] and not process_exited(live["pid"])
+                worker.kill(); worker.wait(timeout=10)
+                assert not process_exited(live["pid"])
+            else:
+                worker.terminate(); worker.wait(timeout=10)
                 with sqlite3.connect(TEMP / "state" / "tasks.sqlite") as db:
                     legacy = json.loads(db.execute("SELECT body FROM tasks WHERE id=?", (t,)).fetchone()[0])
                     if how == "clean":
@@ -955,6 +975,8 @@ def check():
                         legacy["effort"] = "ultra"
                     db.execute("UPDATE tasks SET body=? WHERE id=?", (json.dumps(legacy), t))
             worker=start_worker();notice(t,n)
+            if how == "crash":
+                until(lambda: process_exited(live["pid"]))
             recovered, _ = check_profile(m, t, model, effort, "standard", "thread/resume")
             assert recovered==thread and m.scoped("relay_dispatch",args)["id"]==t
             assert check_access(m, t, access, "thread/resume") == thread

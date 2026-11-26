@@ -10,8 +10,8 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-_temporary = tempfile.TemporaryDirectory(prefix="codex-relay-test-")
-TEMP = Path(_temporary.name)
+_temporary = tempfile.TemporaryDirectory(prefix="codex-relay-test-", dir="/tmp" if sys.platform == "darwin" else None)
+TEMP = Path(_temporary.name).resolve()
 PROJECT = TEMP / "project"
 PROJECT.mkdir()
 ORIGIN = str(uuid.uuid4())

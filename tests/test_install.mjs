@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -11,8 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { distStatus } from '../scripts/dist-status.mjs';
 
 const receiptName = '.codex-relay-installed.json';
+const launcher = 'scripts/run-node.sh';
 function fixture(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'relay-install-'));
+  const dir = mkdtempSync(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'relay-install-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const source = join(dir, 'release'), config = join(dir, 'config');
   const installed = join(config, 'plugins', 'codex-relay'), configFile = join(config, 'config.json');
@@ -24,10 +25,11 @@ function fixture(t) {
   };
   const payload = ['plugin.json', 'mcp_config.json', 'hooks.json', 'rules/AGENTS.md', 'skills/example/SKILL.md',
     'sidecars/events/worker.mjs', 'src/example.mjs', 'dist/server.cjs', 'dist/board.html',
-    'dist/THIRD-PARTY-NOTICES.txt', 'package.json', 'package-lock.json', 'README.md', 'tests/regress.py'];
+    'dist/THIRD-PARTY-NOTICES.txt', 'package.json', 'package-lock.json', 'README.md', 'docs/demo/01-cover.png', 'tests/regress.py'];
   for (const name of payload) put(source, name, name);
   for (const name of ['install.mjs', 'dist-status.mjs'])
     cpSync(fileURLToPath(new URL('../scripts/' + name, import.meta.url)), put(source, 'scripts/' + name, ''));
+  cpSync(fileURLToPath(new URL('../' + launcher, import.meta.url)), join(source, launcher));
   const sourceTime = new Date('2025-01-01T00:00:00Z'), distTime = new Date('2025-01-02T00:00:00Z');
   for (const name of payload) {
     const stamp = name.startsWith('dist/') ? distTime : sourceTime;
@@ -62,7 +64,12 @@ test('first install includes runtime and documentation, and reinstall preserves 
   }
   assert.equal(existsSync(join(f.installed, 'tests')), false);
   assert.deepEqual(distStatus(f.installed).stale, []);
-  const watched = [f.configFile, join(f.installed, 'dist/server.cjs'), join(f.installed, 'README.md')];
+  const installedLauncher = join(f.installed, launcher);
+  assert.equal(statSync(installedLauncher).mode & 0o111, 0o111);
+  const launch = spawnSync(installedLauncher, ['--version'], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(launch.status, 0, launch.error?.message || launch.stderr);
+  assert.equal(launch.stdout.trim(), process.version);
+  const watched = [f.configFile, join(f.installed, 'dist/server.cjs'), join(f.installed, 'README.md'), installedLauncher];
   const metadata = () => watched.map(file => [statSync(file).ino, statSync(file).mtimeMs]);
   const before = metadata(), receipt = f.receipt();
   f.install();
@@ -81,11 +88,14 @@ test('upgrade removes unchanged files tracked by older releases and prunes empty
   rmSync(join(f.installed, 'rules/interrupted/nested/missing.md'));
   f.put(f.installed, 'rules/shared/user.md', 'user');
   f.put(f.source, 'README.md', 'upgraded');
+  const installedLauncher = join(f.installed, launcher);
+  chmodSync(installedLauncher, 0o644);
   f.install();
   for (const path of ['tests', 'rules/legacy', 'rules/shared/old.md', 'rules/interrupted'])
     assert.equal(existsSync(join(f.installed, path)), false, path);
   assert.equal(f.contents(join(f.installed, 'rules/shared/user.md')), 'user');
   assert.equal(f.contents(join(f.installed, 'README.md')), 'upgraded');
+  assert.equal(statSync(installedLauncher).mode & 0o111, 0o111);
   assert.equal(Object.hasOwn(f.receipt(), 'tests/regress.py'), false);
   f.install();
 });
