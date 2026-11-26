@@ -21,10 +21,20 @@ def check_profile(m, task, model, effort, difficulty, thread_method):
     assert view["status"] == "review", view
     board = m.call("relay_board_changes", {})
     selected = m.call("relay_board_changes", {"selected": task})["selected"]
-    for display in (view, selected, next(t for t in board["tasks"] if t["id"] == task)):
+    displays = [selected, next(t for t in board["tasks"] if t["id"] == task)]
+    if view["graphId"]:
+        graph = next(g for g in board["graphs"] if g["graphId"] == view["graphId"] and g["origin"] == ORIGIN)
+        displays.append(next(t for t in graph["nodes"] if t["id"] == task))
+    for display in [view, *displays]:
         assert_profile(display, model, effort, difficulty)
+        assert (display["kind"], display["status"]) == (view["kind"], "review"), display
     turns = json.loads((TEMP / (view["threadId"] + ".history")).read_text())
-    assert turns[-1]["rpcProfiles"] == {thread_method: [model, effort], "turn/start": [model, effort]}, turns[-1]
+    turn = turns[-1]
+    assert turn["rpcProfiles"] == {thread_method: [model, effort], "turn/start": [model, effort]}, turn
+    fields = {"outcome", "summary", "evidence", "next"}
+    if view["kind"] == "discussion":
+        fields.add("disagreement")
+    assert set(json.loads(turn["items"][-1]["text"])) == fields, turn
     return view["threadId"], board["revision"]
 
 
@@ -141,6 +151,17 @@ def check_permissions(m):
 
 
 def check_routing(m):
+    tools = {tool["name"]: tool for tool in m.req("tools/list", {})["tools"]}
+    for name in ("relay_dispatch", "relay_control"):
+        properties = tools[name]["inputSchema"]["properties"]
+        assert properties["model"]["enum"] == [luna, terra, sol, astra]
+        assert "Terra 可用 ultra，Luna、Sol 和 Astra 最高 max。" in properties["effort"]["description"]
+    invalid = {"requestKey": "invalid-route", "title": "invalid-route", "goal": "QUICK"}
+    for model in (luna, sol, astra):
+        rejected(lambda: m.scoped("relay_dispatch", {**invalid, "model": model, "effort": "ultra"}),
+                 f"{model} 的思考等级最高为 max")
+    rejected(lambda: m.scoped("relay_dispatch", {**invalid, "model": "unknown-model"}), "model")
+
     cases = [
         ({"difficulty": "simple"}, luna, "low", "simple"),
         ({"difficulty": "browser"}, terra, "medium", "browser"),
@@ -151,14 +172,35 @@ def check_routing(m):
         ({"model": luna}, luna, "high", "standard"),
         ({"effort": "low"}, sol, "low", "standard"),
         ({"model": terra, "effort": "ultra"}, terra, "ultra", "standard"),
+        ({"model": astra, "effort": "max", "mode": "write", "permission": "full"}, astra, "max", "standard"),
+        ({"model": astra, "difficulty": "hard"}, astra, "xhigh", "hard"),
     ]
     for i, (overrides, model, effort, difficulty) in enumerate(cases):
-        args = {"requestKey": f"route-{i}", "title": f"route-{i}", "goal": "QUICK", **overrides}
+        args = {"requestKey": f"route-{i}", "title": f"route-{i}", "goal": "QUICK", "graphId": "routing", **overrides}
         item = m.scoped("relay_dispatch", args)
         task = item["id"]
+        assert item["kind"] == "execution" and item["mode"] == "write", item
         assert_profile(item, model, effort, difficulty)
         notice(task, timeout=12)
         thread, revision = check_profile(m, task, model, effort, difficulty, "thread/start")
+        expected = full_access if overrides.get("permission") == "full" else default_write
+        assert check_access(m, task, expected, "thread/start") == thread
+        if not overrides:
+            for invalid_model in (luna, sol, astra):
+                rejected(lambda: m.control(task, "resume", "继续核对结果", model=invalid_model, effort="ultra"),
+                         f"{invalid_model} 的思考等级最高为 max")
+            rejected(lambda: m.control(task, "resume", "继续核对结果", model="unknown-model"), "model")
+            n = len(messages())
+            resumed = m.control(task, "resume", "继续核对结果", model=astra, effort="max", permission="auto")
+            assert_profile(resumed, astra, "max", "standard")
+            assert_access(resumed, auto_write)
+            notice(task, n, timeout=12)
+            same_thread, new_revision = check_profile(m, task, astra, "max", "standard", "thread/resume")
+            assert same_thread == thread and new_revision != revision
+            assert check_access(m, task, auto_write, "thread/resume") == thread
+        if effort == "ultra":
+            rejected(lambda: m.control(task, "resume", "继续核对结果", model=astra),
+                     f"{astra} 的思考等级最高为 max")
         if overrides == {"effort": "low"}:
             for changes, next_model, next_effort, level in [
                 ({"model": terra}, terra, "low", "standard"),
@@ -181,11 +223,10 @@ def check_routing(m):
             rejected(lambda: m.scoped("relay_dispatch", {**args, "effort": "medium"}), "requestKey")
             rejected(lambda: m.scoped("relay_dispatch", {**args, "model": terra}), "requestKey")
         m.control(task, "accept")
-    print("PASS default routes, independent dispatch/resume overrides, original-profile retries, board and Codex RPC profiles")
+    print("PASS default routes, Astra dispatch/resume, effort caps, original-profile retries, board and Codex RPC profiles")
 
-    rejected(lambda: m.scoped("relay_dispatch", {"requestKey": "astra-execution", "title": "astra", "goal": "QUICK",
-                                                 "model": astra}), "model")
     item = m.scoped("relay_discuss", {"requestKey": "discussion", "title": "discussion", "question": "QUICK", "position": "初步判断"})
+    assert item["kind"] == "discussion" and item["mode"] == "read", item
     task = item["id"]
     notice(task, timeout=12)
     thread, _ = check_profile(m, task, astra, "max", None, "thread/start")
@@ -549,9 +590,6 @@ def check():
         try: m.call("relay_dispatch",{"requestKey":"bad","title":"bad","goal":"bad","effort":"low"})
         except RuntimeError as e: assert "对话 ID" in str(e)
         else: raise AssertionError("no owner")
-        try: m.scoped("relay_dispatch",{"requestKey":"over","title":"over","goal":"over","effort":"ultra"})
-        except RuntimeError: pass
-        else: raise AssertionError("Sol effort cap")
         try: m.call("relay_dispatch",{"requestKey":"fake","title":"fake","goal":"fake","effort":"max","origin":ORIGIN,"roots":[str(PROJECT)],"hostProof":"0"*64})
         except RuntimeError as e: assert "宿主校验" in str(e)
         else: raise AssertionError("forged context")
@@ -591,26 +629,34 @@ def check():
         m.control(block,"resume","新线索");until(lambda:m.inspect(block)["status"]=="review")
         m.control(block,"accept")
         print("PASS durable outbox retries with no agent polling")
-        for how in ["clean","crash"]:
-            args={"requestKey":how,"title":how,"goal":"HOLD "+how,"model":terra,"effort":"high"}
-            if how == "crash": args["permission"] = "full"
+        recovery_cases = [
+            ("clean", terra, "ultra", default_write),
+            ("crash", astra, "max", full_access),
+            ("legacy-astra-ultra", astra, "max", default_write),
+        ]
+        for how, model, effort, access in recovery_cases:
+            args = dict(requestKey=how, title=how, goal="HOLD " + how, graphId="recovery",
+                        model=model, effort=effort, permission=access[0])
             t=m.scoped("relay_dispatch",args)["id"];until(lambda: m.inspect(t)["command"])
             thread=m.inspect(t)["threadId"];n=len(messages())
-            if how=="clean": worker.terminate()
-            else: worker.kill()
+            if how == "crash": worker.kill()
+            else: worker.terminate()
             worker.wait(timeout=10)
-            if how == "clean":
+            if how != "crash":
                 with sqlite3.connect(TEMP / "state" / "tasks.sqlite") as db:
                     legacy = json.loads(db.execute("SELECT body FROM tasks WHERE id=?", (t,)).fetchone()[0])
-                    for field in (*access_fields, "initialSandbox", "initialApprovalPolicy"):
-                        legacy.pop(field)
+                    if how == "clean":
+                        for field in (*access_fields, "initialSandbox", "initialApprovalPolicy"):
+                            legacy.pop(field)
+                    else:
+                        legacy["effort"] = "ultra"
                     db.execute("UPDATE tasks SET body=? WHERE id=?", (json.dumps(legacy), t))
             worker=start_worker();notice(t,n)
-            recovered, _ = check_profile(m, t, terra, "high", "standard", "thread/resume")
+            recovered, _ = check_profile(m, t, model, effort, "standard", "thread/resume")
             assert recovered==thread and m.scoped("relay_dispatch",args)["id"]==t
-            assert check_access(m, t, default_write if how == "clean" else full_access, "thread/resume") == thread
+            assert check_access(m, t, access, "thread/resume") == thread
             m.control(t,"accept")
-        print("PASS orderly recovery of legacy permissions and crash recovery of full permissions in the original thread")
+        print("PASS same-thread restart recovery with Terra ultra, Astra max, full access and legacy Astra effort cap")
         won=m.dispatch("finished-before-checkpoint","HOLD checkpoint")["id"]
         until(lambda:m.inspect(won)["command"]); original=m.inspect(won)
         worker.kill();worker.wait()
@@ -627,9 +673,10 @@ def check():
         worker=start_worker();notice(retry)
         assert m.inspect(retry)["noticeId"]==event
         m.control(retry,"cancel")
-        print("PASS original event survives full restart; Sol ultra and forged context rejected")
-        assert m.call("relay_board",{})["total"]==9+routed_tasks+permission_tasks
-        assert m.scoped("relay_inspect",{})["total"]==9+routed_tasks+permission_tasks
+        print("PASS original event survives full restart and forged context rejected")
+        total = 7 + len(recovery_cases) + routed_tasks + permission_tasks
+        assert m.call("relay_board",{})["total"] == total
+        assert m.scoped("relay_inspect",{})["total"] == total
         assert m.scoped("relay_inspect",{},str(uuid.uuid4()))["total"]==0
         print("PASS Antigravity can recover its own task list without asking for IDs")
         check_parallel_writes(m)

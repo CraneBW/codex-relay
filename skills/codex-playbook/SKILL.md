@@ -13,7 +13,7 @@ description: 为编码派单、阻塞接手、实验设计、结果复核和方�
 
 简单修改用 `simple`（Luna / `low`）。需要在浏览器实际点击、填表或截图验收时用 `browser`（Terra / `medium`），纯前端代码修改按开发难度选档。常规开发和调试用 `standard`（Sol / `high`），省略 `difficulty` 时也用这档。困难任务用 `hard`（Sol / `xhigh`），极高难度或错误代价高时用 `exceptional`（Sol / `max`）。
 
-首次派单可用 `model`（完整模型 ID）和 `effort` 独立覆盖，省略的参数按难度取默认值。任务面板的列表和详情随任务更新显示当前模型和思考等级。
+首次派单可用 `model`（完整模型 ID）和 `effort` 独立覆盖，省略的参数按难度取默认值。需要更强能力时，可在 `relay_dispatch` 或编码 `resume` 显式指定 `model: 'gpt-6.2-astra'`，并配合 `effort: 'max'`。Terra 可用 `ultra`，Luna、Sol 和 Astra 最高 `max`。任务面板的列表、依赖图和详情随任务更新显示当前模型和思考等级。
 
 会话默认用 `permission: default`，按任务 `mode` 使用 `read-only` 或 `workspace-write`，并采用 `on-request` 按需审批。用户已授权免审批且操作可在所选沙盒完成时，用 `auto`（同一沙盒 + `never`）。只有用户明确要求完全开放，或已授权需要跨工作区、联网等操作且明确涵盖解除沙盒与免审批时，才用 `full`（完全开放权限，`danger-full-access` + `never`）。选择足以完成已授权操作的最小权限。
 
@@ -37,7 +37,7 @@ description: 为编码派单、阻塞接手、实验设计、结果复核和方�
 
 ## 与 Astra Max 设计实验
 
-讨论和追问固定使用 `gpt-6.2-astra` / `max` 与 `default`（`read-only` + `on-request`）。
+`relay_discuss` 讨论和追问固定使用 `gpt-6.2-astra` / `max` 与 `default`（`read-only` + `on-request`）。
 
 > 我想区分 [解释 A] 和 [解释 B]。已有材料在 [路径]，预算或约束是 [约束]。请反重力先给出预测，检视实验约束是否过严、两种解释是否框得太窄，再请 Astra Max 找反例、混杂因素和替代解释。选一个能区分关键解释的对照，列出观察指标、可能结果和对应解释。
 

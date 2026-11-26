@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { socketPath } from './paths.mjs';
-import { approvalPolicies, astra, codingModels, difficulties, efforts, permissions, sandboxModes } from './models.mjs';
+import { approvalPolicies, codingModels, difficulties, efforts, permissions, sandboxModes } from './models.mjs';
 
 const server = new McpServer({ name: 'codex-relay', version: '0.1.1' });
 const uri = 'ui://codex-relay/board.html';
@@ -25,7 +25,7 @@ const taskId = z.string().uuid();
 const appOnly = { ui: { visibility: ['app'] } };
 const modelOnly = { ui: { visibility: ['model'] } };
 const codingRoutes = 'simple 为 Luna/low（简单修改），browser 为 Terra/medium（实际点击、填表或截图验收，纯前端开发按难度选择），standard 为 Sol/high（常规开发和调试，默认），hard 为 Sol/xhigh，exceptional 为 Sol/max。';
-const effortLimit = 'Terra 可用 ultra，Luna 和 Sol 最高 max。';
+const effortLimit = 'Terra 可用 ultra，Luna、Sol 和 Astra 最高 max。';
 const permissionPresets = 'default 按 mode 选择沙盒并按需审批，auto 保留同样的沙盒并免审批，full 为完全开放权限（danger-full-access + never）。mode 为 read 时仅可使用 read-only 沙盒，禁止 full。';
 const sessionPermissions = {
   permission: z.enum(permissions).optional().describe(permissionPresets + ' 仅在用户授权范围内启用 auto 或 full。'),
@@ -65,7 +65,7 @@ register('relay_dispatch', '将实现、修复或测试交给 Codex。' + coding
   title: z.string().trim().min(1).max(160), goal: z.string().trim().min(1).max(24000),
   cwd: z.string().max(4096).optional(), mode: z.enum(['read','write']).default('write').describe('read 默认只读沙盒，write 默认工作区写入沙盒并参与目录写锁。'),
   difficulty: z.enum(difficulties).optional().describe(codingRoutes),
-  model: z.enum(codingModels).optional().describe('独立指定编码模型。省略时使用难度对应的默认模型。'),
+  model: z.enum(codingModels).optional().describe('独立指定编码模型。高难度或复杂任务可显式指定 gpt-6.2-astra（Astra Max）。省略时使用难度对应的默认模型。'),
   effort: z.enum(efforts).optional().describe('独立指定思考等级。省略时使用难度对应的默认等级。' + effortLimit), ...sessionPermissions, ...graph, ...context,
 }, 'dispatch');
 register('relay_discuss', '邀请 Astra Max 与反重力讨论实验、结果或方案。每次发起前，主对话必须先自省问题是否框得太窄、前提或验收标准是否过严，并主动引导对原框定之外的路径进行检验。直接讨论和委托讨论均适用。收口时主对话亲自重审预设、发散思考并负责最终定论。Astra 在只读项目中核对材料，返回时唤醒当前控制讨论的对话。', {
@@ -83,7 +83,7 @@ register('relay_control', 'steer 追加指令，takeover 等 Codex 停止后交�
   id: taskId, action: z.enum(['steer','takeover','resume','ask_user','accept','cancel','claim','handover']),
   note: z.string().max(10000).optional(), expectedNotice: z.string().uuid().optional().describe('从通知操作任务时填写通知事件 ID。'), ...context,
   difficulty: z.enum(difficulties).optional().describe('用于编码续跑。省略时保留上一轮难度。' + codingRoutes),
-  model: z.enum([...codingModels, astra]).optional().describe('resume 独立指定下一轮模型。编码任务省略时按新难度取默认模型，未改难度时沿用上一轮。Astra 仅用于讨论任务。'),
+  model: z.enum(codingModels).optional().describe('resume 独立指定下一轮模型。编码任务可指定 gpt-6.2-astra（Astra Max）。省略时按新难度取默认模型，未改难度时沿用上一轮。讨论任务固定使用 gpt-6.2-astra。'),
   effort: z.enum(efforts).optional().describe('resume 独立指定下一轮思考等级。编码任务省略时按新难度取默认等级，未改难度时沿用上一轮。' + effortLimit + ' Astra 讨论固定 max。'),
   ...sessionPermissions,
 }, 'control');

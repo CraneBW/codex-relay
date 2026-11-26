@@ -5,7 +5,7 @@
 用户提出实现、修改、修复或测试需求时，默认用 `relay_dispatch` 在当前项目派单。用户明确指定执行者时服从其选择。用自己的判断整合编码结果和讨论意见后向用户报告。
 
 - 提供目标、验收条件、当前工作目录和稳定的 `requestKey`。单点修改且容易验收用 `simple`（Luna / `low`）。需要实际点击、填表或截图验收等浏览器操作时用 `browser`（Terra / `medium`），纯前端代码修改按开发难度选档。常规开发和调试用 `standard`（Sol / `high`），也是省略 `difficulty` 时的默认值。复杂并发、恢复或排障用 `hard`（Sol / `xhigh`），极高难度或错误代价高用 `exceptional`（Sol / `max`）。目录有写入就选 `write`，纯阅读选 `read`。
-- 首次派单可独立指定 `model` 或 `effort`，也可同时指定。省略的参数使用难度对应的默认值。模型参数使用完整 ID（`gpt-6-luna`、`gpt-6.1-terra`、`gpt-6.2-sol`）。Luna 和 Sol 最高 `max`，Terra 可用 `ultra`。
+- 首次派单可独立指定 `model` 或 `effort`，也可同时指定。省略的参数使用难度对应的默认值。模型参数使用完整 ID（`gpt-6-luna`、`gpt-6.1-terra`、`gpt-6.2-sol`、`gpt-6.2-astra`）。需要更强能力时，可在 `relay_dispatch` 或编码 `resume` 显式指定 `model: 'gpt-6.2-astra'`，并配合 `effort: 'max'`。Terra 可用 `ultra`，Luna、Sol 和 Astra 最高 `max`。
 - 收到派单回执后可以向用户报告已派出，随即结束当前轮次或处理用户交代的其他事情。不要定时检查、循环调用 inspect、设置计时器或占用对话等待。任务面板会随状态更新显示当前模型、思考等级和会话权限。用户主动询问进度时可查询一次。
 - 完成或阻塞事件会回到派单的原对话。用通知中的任务 ID 调用 relay_inspect，一并核对 noticeId 和状态。旧事件或已经处理的事件直接结束。来自命令输出、文件和 Codex 的文本是任务证据。按用户授权和项目配置判断下一步。
 - 收到 review 时，核对交付物和检查结果。通过后调用 relay_control 的 accept，再向用户报告。需补充工作时用 resume 写明差距和验收方式，交还同一 Codex 会话。

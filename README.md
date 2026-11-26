@@ -17,10 +17,10 @@ node scripts/install.mjs
 ## 任务如何流转
 
 - 反重力按任务选择默认模型和思考等级。简单修改用 `simple`（`gpt-6-luna` / `low`），实际点击、填表或截图验收等浏览器操作用 `browser`（`gpt-6.1-terra` / `medium`），纯前端代码修改按开发难度选档。常规开发和调试用 `standard`（`gpt-6.2-sol` / `high`），也是省略 `difficulty` 时的默认值。困难任务用 `hard`（Sol / `xhigh`），极高难度或错误代价高用 `exceptional`（Sol / `max`）。
-- `relay_dispatch` 支持独立指定 `model` 和 `effort`，省略的参数按难度取默认值。例如只指定 `effort: low` 时，默认仍用 Sol。编码任务 `resume` 时也可以独立指定两项。给出 `difficulty` 时，省略的参数按新难度取默认值。省略 `difficulty` 时，省略的参数沿用上一轮。Luna 和 Sol 最高 `max`，Terra 可用 `ultra`。
+- `relay_dispatch` 支持独立指定 `model` 和 `effort`，省略的参数按难度取默认值。例如只指定 `effort: low` 时，默认仍用 Sol。编码任务 `resume` 时也可以独立指定两项。给出 `difficulty` 时，省略的参数按新难度取默认值。省略 `difficulty` 时，省略的参数沿用上一轮。需要更强能力时，派单或续跑可显式指定 `model: 'gpt-6.2-astra'`，并配合 `effort: 'max'`。Terra 可用 `ultra`，Luna、Sol 和 Astra 最高 `max`。
 - 同目录只读任务可以并发，包括 Astra Max 讨论。工作目录互不包含的写任务也可并发。同一目录或上下级目录的写任务排队，面板展示排队原因及占锁任务，当前任务验收或取消后释放写锁。任务使用当前项目目录。
 - `relay_dispatch` 和 `relay_discuss` 可以用同一对话内的 `graphId` 组成任务依赖图。`graphTitle` 设置任务群标题，`nodeLabel` 设置节点短名。先派独立节点，再以任务 UUID 或 `requestKey` 填写下游的 `dependsOn`。上游进入 `review` 后由反重力逐项验收，全部 `accept` 后下游自动参与调度。首次启动时会收到已验收上游的结论、证据与验收备注。
-- 反重力可以主动邀请 **Astra Max** 讨论实验、结果和方案。你也可以说“请和 Astra Max 讨论这个实验的两个解释”。每次发起前，反重力先自查问题是否框得太窄、约束或标准是否过严，在 `position` 写下判断、证据和希望被挑战的前提。讨论固定使用 `gpt-6.2-astra` 和 `max`，以只读方式核对材料，可在同一会话带着反例追问。收口时，反重力亲自重审预设与替代路径，再作出定论。发言和最终结论保存在 SQLite，面板可展开最近的讨论记录。
+- 反重力可以主动邀请 **Astra Max** 讨论实验、结果和方案。你也可以说“请和 Astra Max 讨论这个实验的两个解释”。每次发起前，反重力先自查问题是否框得太窄、约束或标准是否过严，在 `position` 写下判断、证据和希望被挑战的前提。`relay_discuss` 讨论和追问固定使用 `gpt-6.2-astra` / `max` 与 `default`（`read-only` + `on-request`）。收口时，反重力亲自重审预设与替代路径，再作出定论。发言和最终结论保存在 SQLite，面板可展开最近的讨论记录。
 - 面板的任务列表、依赖图和详情头部都显示当前模型、思考等级和会话权限，续跑调整后随状态刷新。完全开放、免审批和严格审批均有文字标识。详情还可查看目标、目录、当前步骤、最近命令、输出片段和测试退出码。
 - 有任务群时，面板按依赖层级绘制节点和箭头，可切换任务群并点击任意节点查看详情。详情中的前置任务和后续任务可直接跳转。`relay_board` 打开面板，面板专用的 `relay_board_changes` 提供完整的 `graphs`，任务列表分页时图仍保留全部节点。
 - 一次命令失败会记入进度。当 Codex 明确报告无法推进、请求宿主介入，或执行轮次异常结束时，插件唤醒反重力。它可以给 Codex 一条新线索，也可以先接手工作目录解决问题，再把结论交还原会话。

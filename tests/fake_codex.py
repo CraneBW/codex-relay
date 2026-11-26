@@ -17,7 +17,7 @@ def permissions(params):
 
 def finish(kind):
     data={"outcome":kind,"summary":"验证交付" if kind=="done" else "缺输入","evidence":"测试证据","next":"由反重力补输入" if kind=="blocked" else ""}
-    if selected_model=="gpt-6.2-astra": data["disagreement"]=""
+    if discussion: data["disagreement"]=""
     i={"type":"agentMessage","text":json.dumps(data),"id":"message","phase":"final_answer"}
     event("item/completed", dict(threadId=thread,turnId=turn["id"],item=i))
     turn["items"].append(i); turn["status"]="completed"; save_thread(thread,records)
@@ -33,14 +33,17 @@ for raw in sys.stdin:
         selected_effort=p["config"]["model_reasoning_effort"]
         thread_method=m
         thread_permissions=permissions(p)
-        if selected_model=="gpt-6.2-astra":
-            assert (p["sandbox"], p["approvalPolicy"], selected_effort)==("read-only", "on-request", "max")
         reply(x,{"thread":{"id":thread,"status":{"type":"idle"}}})
     elif m=="thread/turns/list": reply(x,{"data":list(reversed(records)),"nextCursor":None})
     elif m=="turn/start":
         assert (p["model"],p["effort"])==(selected_model,selected_effort)
         assert p["effort"] in ("low","medium","high","xhigh","max") or (selected_model=="gpt-6.1-terra" and p["effort"]=="ultra")
         assert p["outputSchema"]["additionalProperties"] is False
+        discussion = "disagreement" in p["outputSchema"]["properties"]
+        if discussion:
+            assert selected_model == "gpt-6.2-astra"
+            assert (thread_permissions["sandbox"], thread_permissions["approvalPolicy"], selected_effort) == ("read-only", "on-request", "max")
+            assert permissions(p) == {"approvalPolicy": "on-request"}
         text=p["input"][0]["text"]; turn={"id":str(uuid.uuid4()),"status":"inProgress","items":[{"type":"userMessage","content":p["input"]}]}
         turn["rpcProfiles"]={thread_method:[selected_model,selected_effort],m:[p["model"],p["effort"]]}
         turn["rpcPermissions"]={thread_method:thread_permissions,m:permissions(p)}

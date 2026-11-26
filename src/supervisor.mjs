@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { Codex, discussionInstructions, discussionSchema, instructions, outcome, resultSchema } from './codex.mjs';
-import { astra, codingProfile, sessionPermission, sol } from './models.mjs';
+import { astra, codingProfile, sessionPermission, sol, terra } from './models.mjs';
 import { clip, now, tail, taskLabel, terminal } from './store.mjs';
 import { inside } from './paths.mjs';
 import { checkContext } from './context.mjs';
@@ -189,7 +189,7 @@ export class Supervisor {
       if (t.intent) return;
       const discussion = t.kind === 'discussion';
       const model = t.model = discussion ? astra : t.model || sol;
-      if (discussion || (model === sol && t.effort === 'ultra')) t.effort = 'max';
+      if (discussion || (model !== terra && t.effort === 'ultra')) t.effort = 'max';
       const { permission, sandbox, approvalPolicy } = taskPermission({}, t.mode, discussion, t);
       const opts = { cwd: t.cwd, model, approvalPolicy, sandbox,
         config: { model_reasoning_effort: t.effort },
