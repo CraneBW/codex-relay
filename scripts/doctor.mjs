@@ -19,10 +19,11 @@ function report(level, label, detail) {
   if (level === 'FAIL') process.exitCode = 1;
 }
 
-function checkCommand(label, command, args) {
+function checkCommand(label, command, args, missingDetail) {
   const { status, signal, error, stdout, stderr } = spawnSync(command, args, {
     encoding: 'utf8', timeout: 5000, maxBuffer: 128 * 1024,
   });
+  if (error?.code === 'ENOENT' && missingDetail) return report('WARN', label, missingDetail);
   const detail = `${command} ${((status === 0 ? stdout : stderr || stdout) || '').trim().split('\n')[0]}`.trim();
   if (error || status !== 0) report('FAIL', label, `${detail} · ${error?.message || signal || '退出码 ' + status}`);
   else report('OK', label, detail);
@@ -86,14 +87,15 @@ function checkDatabase(DatabaseSync, path) {
 console.log('Codex 调度台诊断 · ' + version);
 report(nodeSupported ? 'OK' : 'FAIL', 'Node.js', `${process.version}（要求 ${engines.node}）`);
 checkCommand('Codex CLI', process.env.CODEX_RELAY_CODEX || 'codex', ['--version']);
-checkCommand('agentapi', process.env.CODEX_RELAY_AGENTAPI || 'agentapi', ['--help']);
+const agentapi = process.env.CODEX_RELAY_AGENTAPI;
+const agentapiRequired = agentapi || process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+checkCommand('agentapi', agentapi || 'agentapi', ['--help'], agentapiRequired ? undefined :
+  '当前环境未找到，Antigravity 会将 agentapi 加入后台组件的 PATH');
 try {
-  const { missing, stale, newest } = distStatus(root);
-  if (missing.length || stale.length) {
-    const issues = [missing.length ? '缺少 ' + missing.join('、') : '',
-      stale.length ? stale.join('、') + ' 早于 ' + newest : ''].filter(Boolean);
-    report('FAIL', 'dist', issues.join(' · ') + ' · 请运行 npm run build');
-  } else report('OK', 'dist', 'server.cjs 和 board.html 均已更新');
+  const { missing, changed } = distStatus(root);
+  if (missing.length) report('FAIL', 'dist', '缺少 ' + missing.join('、') + ' · 请运行 npm run build');
+  else if (changed.length) report('FAIL', 'dist', '构建清单不符 · ' + changed.join('、') + ' · 请运行 npm run build');
+  else report('OK', 'dist', '构建清单与当前文件一致');
 } catch (error) { report('FAIL', 'dist', error.message); }
 
 const [socketLevel, socketDetail] = await checkSocket();

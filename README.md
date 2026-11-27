@@ -23,7 +23,7 @@
 node scripts/install.mjs
 ```
 
-安装器将插件复制到 `~/.gemini/config/plugins/codex-relay/`，并启用 `codex-relay/events` 后台组件。更新已有 `config.json` 前会在同目录保存备份。升级会清理新版已移除且内容未变的文件，发现本地修改时会停止并提示具体路径。如果构建产物早于源码，先运行 `npm run build`。明确需要使用旧产物时，可加 `--allow-stale-dist`。
+安装器将插件复制到 `~/.gemini/config/plugins/codex-relay/`，并启用 `codex-relay/events` 后台组件。更新已有 `config.json` 前会在同目录保存备份。升级会清理新版已移除且内容未变的文件，发现本地修改时会停止并提示具体路径。安装器按构建清单校验源码和产物的内容，文件时间戳变化无需重新构建。内容不符时运行 `npm run build`。明确需要使用旧产物时，可加 `--allow-stale-dist`。
 
 打开反重力项目，直接说“修复登录测试，跑通后告诉我”。在侧面板的 **＋ → 插件 → Codex 任务** 打开面板，也可以在对话中说“打开 Codex 任务面板”。如果安装前应用已经打开且尚未发现新组件，重新打开桌面应用。Google 的桌面应用负责启动和停止该后台组件。[插件开发文档](https://antigravity.google/docs/build-plugins/) · [后台组件文档](https://antigravity.google/docs/sidecars)
 
@@ -93,6 +93,6 @@ MCP 服务与面板在 `dist/`。后台组件和 Codex 协议处理在 `sidecars
 
 输入 `/codex-playbook` 查看随插件安装的中文提示词，涵盖编码派单、并行拆解与依赖图、阻塞交接、实验设计、结果复核、方案比较和同一会话追问。[提示词全文](skills/codex-playbook/SKILL.md)
 
-运行 `npm run doctor` 检查 Node.js、Codex CLI、agentapi、构建时效、后台套接字和锁，以及 SQLite 可读性和各表行数。后台尚未启动或数据库尚未创建时会显示警告。
+运行 `npm run doctor` 检查 Node.js、Codex CLI、agentapi、构建清单、后台套接字和锁，以及 SQLite 可读性和各表行数。Antigravity 启动后台组件时会提供 `agentapi`，普通终端找不到它时诊断会显示提示。后台尚未启动或数据库尚未创建时也会显示警告。
 
 运行 `npm test` 执行单元测试和全部模拟回归，覆盖面板、安装升级、派单续跑、依赖图、通知及恢复。只运行单元测试可用 `npm run test:unit`。测试使用临时目录与可控的 Codex 进程。运行 `python3 -B tests/probe.py` 或 `python3 -B tests/discussion.py` 会分别调用真实编码模型或 Astra Max，使用本机 Codex 账户，并把测试通知送到临时接收器。

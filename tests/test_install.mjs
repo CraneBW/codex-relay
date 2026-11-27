@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { distStatus } from '../scripts/dist-status.mjs';
+import { buildInputHashes, distStatus, writeDistManifest } from '../scripts/dist-status.mjs';
 
 const receiptName = '.codex-relay-installed.json';
 const launcher = 'scripts/run-node.sh';
@@ -27,7 +27,7 @@ function fixture(t) {
     'sidecars/events/worker.mjs', 'src/example.mjs', 'dist/server.cjs', 'dist/board.html',
     'dist/THIRD-PARTY-NOTICES.txt', 'package.json', 'package-lock.json', 'README.md', 'docs/demo/01-cover.png', 'tests/regress.py'];
   for (const name of payload) put(source, name, name);
-  for (const name of ['install.mjs', 'dist-status.mjs'])
+  for (const name of ['build.mjs', 'install.mjs', 'dist-status.mjs'])
     cpSync(fileURLToPath(new URL('../scripts/' + name, import.meta.url)), put(source, 'scripts/' + name, ''));
   cpSync(fileURLToPath(new URL('../' + launcher, import.meta.url)), join(source, launcher));
   const sourceTime = new Date('2025-01-01T00:00:00Z'), distTime = new Date('2025-01-02T00:00:00Z');
@@ -35,6 +35,7 @@ function fixture(t) {
     const stamp = name.startsWith('dist/') ? distTime : sourceTime;
     utimesSync(join(source, name), stamp, stamp);
   }
+  writeDistManifest(source, buildInputHashes(source));
   const run = ({ flags = [], preload = [], env = {} } = {}) => spawnSync(process.execPath,
     [...preload, join(source, 'scripts', 'install.mjs'), '--config-dir', config, ...flags],
     { cwd: dir, encoding: 'utf8', timeout: 5000, env: { ...process.env, ...env } });
@@ -63,7 +64,7 @@ test('first install includes runtime and documentation, and reinstall preserves 
     assert.equal(f.receipt()[name], createHash('sha256').update(name).digest('hex'));
   }
   assert.equal(existsSync(join(f.installed, 'tests')), false);
-  assert.deepEqual(distStatus(f.installed).stale, []);
+  assert.deepEqual(distStatus(f.installed), { missing: [], changed: [] });
   const installedLauncher = join(f.installed, launcher);
   assert.equal(statSync(installedLauncher).mode & 0o111, 0o111);
   const launch = spawnSync(installedLauncher, ['--version'], { encoding: 'utf8', timeout: 5000 });
@@ -122,13 +123,28 @@ test('local edits to retained and removed files both stop the upgrade before wri
   assert.deepEqual(f.receipt(), receipt);
 });
 
-test('an old output requires an explicit bypass and missing outputs still stop installation', t => {
+test('install accepts checkout timestamps and skips Finder metadata', t => {
   const f = fixture(t);
-  const stale = new Date('2024-01-01T00:00:00Z');
-  utimesSync(join(f.source, 'dist/board.html'), stale, stale);
+  const checkedOut = new Date('2025-01-03T00:00:00Z');
+  utimesSync(join(f.source, 'src/example.mjs'), checkedOut, checkedOut);
+  f.put(f.source, 'src/.DS_Store', 'Finder metadata');
+  f.put(f.source, 'src/._example.mjs', 'AppleDouble metadata');
+  f.install();
+  assert.equal(existsSync(join(f.installed, 'src/.DS_Store')), false);
+  assert.equal(existsSync(join(f.installed, 'src/._example.mjs')), false);
+  assert.deepEqual(distStatus(f.installed), { missing: [], changed: [] });
+});
+
+test('edited build inputs or outputs require an explicit bypass and missing outputs stop installation', t => {
+  const f = fixture(t);
+  const input = join(f.source, 'src/example.mjs');
+  const { atime, mtime } = statSync(input);
+  writeFileSync(input, 'changed source');
+  utimesSync(input, atime, mtime);
+  f.put(f.source, 'dist/board.html', 'changed output');
   const denied = f.run();
   assert.equal(denied.status, 1);
-  assert.match(denied.stderr, /dist\/board\.html.*src\/example\.mjs.*npm run build/);
+  assert.match(denied.stderr, /构建清单.*src\/example\.mjs.*dist\/board\.html.*npm run build/);
   assert.equal(existsSync(f.config), false);
   f.install({ flags: ['--allow-stale-dist'] });
   rmSync(join(f.source, 'dist/server.cjs'));
@@ -184,8 +200,8 @@ test('doctor reads the worker database and confirms its lock survives garbage co
   for (const name of ['scripts/doctor.mjs', 'src/paths.mjs']) {
     const dest = join(f.source, name);
     cpSync(fileURLToPath(new URL('../' + name, import.meta.url)), dest);
-    if (name.startsWith('src/')) utimesSync(dest, new Date(0), new Date(0));
   }
+  writeDistManifest(f.source, buildInputHashes(f.source));
   const runtime = join(f.dir, 'runtime');
   const env = { ...process.env, CODEX_RELAY_DATA:runtime, CODEX_RELAY_SOCKET_DIR:runtime,
     CODEX_RELAY_CODEX:process.execPath, CODEX_RELAY_AGENTAPI:process.execPath };
@@ -211,8 +227,9 @@ test('doctor reads the worker database and confirms its lock survives garbage co
     const collected = join(runtime, 'collected');
     for (let n = 0; n < 100 && !existsSync(collected) && worker.exitCode === null; n++) await delay(10);
     assert.ok(existsSync(collected), stderr);
-    const probe = () => spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(f.source, 'scripts/doctor.mjs')],
-      { env, encoding:'utf8', timeout:5000 });
+    const probe = (probeEnv = env) => spawnSync(process.execPath,
+      ['--disable-warning=ExperimentalWarning', join(f.source, 'scripts/doctor.mjs')],
+      { env:probeEnv, encoding:'utf8', timeout:5000 });
     const active = probe();
     assert.equal(active.status, 0, active.stdout || active.stderr);
     assert.match(active.stdout, /\[OK\] 套接字 .*可连接/);
@@ -224,6 +241,19 @@ test('doctor reads the worker database and confirms its lock survives garbage co
     assert.equal(stopped.status, 0, stopped.stdout || stopped.stderr);
     assert.match(stopped.stdout, /\[WARN\] 套接字 .*尚未创建/);
     assert.match(stopped.stdout, /\[OK\] 后台锁 .*空闲/);
+
+    const shellEnv = { ...env, PATH:f.dir };
+    delete shellEnv.CODEX_RELAY_AGENTAPI;
+    delete shellEnv.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+    const outsideHost = probe(shellEnv);
+    assert.equal(outsideHost.status, 0, outsideHost.stdout || outsideHost.stderr);
+    assert.match(outsideHost.stdout, /\[WARN\] agentapi .*Antigravity/);
+    for (const required of [{ CODEX_RELAY_AGENTAPI:join(f.dir, 'missing-agentapi') },
+      { ANTIGRAVITY_EXECUTABLE_DATA_DIR:runtime }]) {
+      const missing = probe({ ...shellEnv, ...required });
+      assert.equal(missing.status, 1, missing.stdout || missing.stderr);
+      assert.match(missing.stdout, /\[FAIL\] agentapi .*ENOENT/);
+    }
   } finally {
     if (worker.exitCode === null && worker.signalCode === null) worker.kill();
     await exited;

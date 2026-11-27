@@ -3,9 +3,9 @@ import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, re
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { distStatus } from './dist-status.mjs';
+import { distStatus, fingerprint } from './dist-status.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const entries = ['plugin.json','mcp_config.json','hooks.json','rules','skills','sidecars','dist','src','scripts','package.json','package-lock.json','README.md'];
@@ -14,10 +14,10 @@ const realpath = process.platform === 'darwin' ? realpathSync.native : realpathS
 const { values: args } = parseArgs({ options: {
   'config-dir': { type: 'string' }, 'allow-stale-dist': { type: 'boolean' },
 } });
-const { missing, stale, newest } = distStatus(root);
+const { missing, changed } = distStatus(root);
 if (missing.length) throw Error('安装包缺少 ' + missing.join('、') + '。请先运行 npm run build。');
-if (stale.length && !args['allow-stale-dist'])
-  throw Error(stale.join('、') + ' 早于源码 ' + newest + '。请先运行 npm run build，或显式使用 --allow-stale-dist。');
+if (changed.length && !args['allow-stale-dist'])
+  throw Error('构建清单与当前文件不符（' + changed.join('、') + '）。请先运行 npm run build，或显式使用 --allow-stale-dist。');
 const config = resolve(args['config-dir'] || join(homedir(), '.gemini', 'config'));
 const plugins = join(config, 'plugins'), destination = join(plugins, 'codex-relay'), configFile = join(config, 'config.json');
 const original = existsSync(configFile) ? readFileSync(configFile, 'utf8') : null;
@@ -30,12 +30,13 @@ if (settings.sidecars[key] != null && !object(settings.sidecars[key])) throw Err
 const alreadyEnabled = settings.sidecars[key]?.enabled === true;
 settings.sidecars[key] = { ...settings.sidecars[key], enabled: true };
 
-const fingerprint = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 function files(dir) {
   const info = lstatSync(dir);
   if (info.isFile()) return [relative(root,dir)];
   if (!info.isDirectory()) throw Error('安装包包含非普通文件 ' + dir);
-  return readdirSync(dir).filter(s => s !== '__pycache__').flatMap(s => files(join(dir,s)));
+  return readdirSync(dir)
+    .filter(s => s !== '__pycache__' && s !== '.DS_Store' && !s.startsWith('._'))
+    .flatMap(s => files(join(dir,s)));
 }
 function statIfPresent(path) {
   try { return lstatSync(path); }
@@ -88,9 +89,6 @@ if (statIfPresent(destination)) {
           const targetMode = lstatSync(join(destination, name)).mode;
           const sourceMode = lstatSync(join(root, name)).mode;
           if ((targetMode & 0o111) === (sourceMode & 0o111)) continue;
-        } else if (name === 'dist/server.cjs' || name === 'dist/board.html') {
-          // Rebuilds can leave the bundle bytes unchanged even when worker sources changed.
-          if (lstatSync(join(destination, name)).mtimeMs >= Math.floor(lstatSync(join(root, name)).mtimeMs)) continue;
         } else continue;
       }
       else if (current !== null && current !== previous[name]) throw localChange(join(destination,name));

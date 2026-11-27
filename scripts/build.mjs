@@ -1,13 +1,16 @@
 import { build } from 'esbuild';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { buildInputHashes, writeDistManifest } from './dist-status.mjs';
 
-process.chdir(fileURLToPath(new URL('../', import.meta.url)));
+const root = fileURLToPath(new URL('../', import.meta.url));
+process.chdir(root);
 const { version } = JSON.parse(await readFile('package.json', 'utf8'));
 const plugin = JSON.parse(await readFile('plugin.json', 'utf8'));
 if (!version || plugin.version !== version) {
   throw Error(`plugin.json 的版本 ${plugin.version} 必须与 package.json 的版本 ${version} 一致。`);
 }
+const inputs = buildInputHashes(root);
 await mkdir('dist', { recursive: true });
 const server = await build({ entryPoints: ['src/server.mjs'], bundle: true, platform: 'node', format: 'cjs',
   target: 'node22', outfile: 'dist/server.cjs', minify: true, legalComments: 'eof', metafile: true });
@@ -36,3 +39,4 @@ for (const dir of [...bundled].sort()) {
   notices.push(pkg.name + ' ' + pkg.version + ' · ' + (pkg.license || '') + '\n' + texts.join('\n'));
 }
 await writeFile('dist/THIRD-PARTY-NOTICES.txt', notices.join('\n\n'));
+writeDistManifest(root, inputs);
